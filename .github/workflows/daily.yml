@@ -1,0 +1,35 @@
+name: 🫘 Doubao Work Daily
+
+on:
+  workflow_dispatch:
+  # 定时默认关闭；确认账号可用后取消下面两行注释
+  # schedule:
+  #   - cron: "15 1 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Run Doubao Work Daily
+        env:
+          DOUBAOWORK_COOKIES: ${{ secrets.DOUBAOWORK_COOKIES }}
+          DOUBAOWORK_COOKIE: ${{ secrets.DOUBAOWORK_COOKIE }}
+          DOUBAOWORK_DEVICE_ID: ${{ secrets.DOUBAOWORK_DEVICE_ID }}
+          DOUBAOWORK_WEB_ID: ${{ secrets.DOUBAOWORK_WEB_ID }}
+          DOUBAOWORK_FINGERPRINT: ${{ secrets.DOUBAOWORK_FINGERPRINT }}
+          DOUBAOWORK_PROXY: ${{ secrets.DOUBAOWORK_PROXY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: python doubaowork_daily.py
