@@ -244,6 +244,17 @@ pip3 install requests
 
 反馈时请附上脱敏后的运行状态和接口阶段，不要提交 Cookie、device_id、web_id 或完整账号信息。
 
+### ☕ 赞赏支持
+
+项目免费开放，赞赏完全自愿，不影响任何功能。如果它帮你省下了时间，可以扫码请我喝杯咖啡。
+
+<p align="center">
+  <img src="assets/donate-wechat.png" width="260" alt="微信赞赏码" />
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="assets/donate-alipay.jpg" width="260" alt="支付宝赞赏码" />
+</p>
+<p align="center"><sub>💚 微信支付（左） &nbsp;|&nbsp; 💙 支付宝（右，支持信用卡 / 花呗）</sub></p>
+
 ## ✦ 星轨 Star Trail
 
 一条豆包信号穿过活动轨道，每一次 Star 都让下一次运行更容易被看见。
