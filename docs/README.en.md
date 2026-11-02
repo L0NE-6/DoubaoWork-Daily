@@ -118,6 +118,10 @@ The claim endpoint alone is not the final proof. After submitting the reward req
 - The script masks cookies in logs and does not write account data to the repository.
 - Rotate the session if a cookie was exposed.
 
+## Usage and redistribution
+
+The official repository, scripts, deployment instructions, and Release downloads are free. Paid packaging, paid deployment, membership gating, resale, removal of attribution, impersonation of the author, use of the author's identity or QR codes as endorsement, and reposting to unrelated accounts, groups, or channels for traffic diversion are not permitted. Violations may require removal of the content; the author may pause updates, archive the repository, or delete it. See [../NOTICE.md](../NOTICE.md) for the complete rules.
+
 ## 🔗 Project links
 
 - [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases)

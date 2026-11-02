@@ -115,6 +115,10 @@ pip3 install requests
 - 日誌會遮罩 Cookie，不會寫入帳號資料。
 - Cookie 若曾公開，請立即重新登入或使舊工作階段失效。
 
+## 使用邊界與轉載聲明
+
+官方版本免費。禁止付費包裝、付費部署、會員門檻、轉售、刪除署名、冒充作者、以作者身分或二維碼作背書，或搬運到無關帳號、群組與頻道引流。違規內容可能被要求下架；作者可暫停更新、封存或刪除倉庫。完整規則見 [../NOTICE.md](../NOTICE.md)。
+
 ## 🔗 專案連結
 
 - [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases)

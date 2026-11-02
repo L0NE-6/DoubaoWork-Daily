@@ -115,6 +115,10 @@ A resposta do endpoint de resgate não basta. Depois de solicitar a recompensa, 
 - Os logs mascaram o Cookie e o projeto não grava dados da conta no repositório.
 - Se um Cookie foi exposto, renove a sessão.
 
+## Limites de uso e redistribuição
+
+O repositório oficial, os scripts, as instruções de implantação e os downloads das Releases são gratuitos. Não são permitidos empacotamento pago, implantação paga, exigência de assinatura, revenda, remoção de autoria, personificação do autor, uso da identidade ou dos QR codes do autor como endosso, nem repostagem em contas, grupos ou canais sem relação para desviar tráfego. O conteúdo irregular pode ser retirado; o autor pode pausar atualizações, arquivar ou excluir o repositório. Consulte [../NOTICE.md](../NOTICE.md) para as regras completas.
+
 ## 🔗 Links
 
 - [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases)
