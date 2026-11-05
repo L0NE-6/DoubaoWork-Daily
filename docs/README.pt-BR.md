@@ -22,10 +22,10 @@
 - Escolhe o endpoint v3 de detalhes ou a lista regular de campanhas.
 - Continua apenas quando existe exatamente uma tarefa `daily_checkin`.
 - Trata recompensa já recebida, campanha não publicada e condição não atendida como estados neutros.
-- Relê os detalhes após o resgate e exige `checked_in_today=true` ou `task_status=3`.
+- Relê os detalhes após o resgate e aceita somente `checked_in_today=true`; `task_status=3` nunca substitui um false explícito.
 - Suporta várias contas, modo somente consulta, seleção de uma conta e notificações PushPlus, Bark e WeCom.
 
-> O provider `doubaowork` do Agent2Providers `v3.3.0-beta.6` está marcado como implementado, mas ainda sem teste em conta real. Este projeto é uma implementação clean-room do mesmo protocolo Cookie + campaign + reward. Comece com `--query`.
+> A máquina de estados segue `doubaowork/checkin`, `checkin_state` e `rewards` do Agent2Providers `v3.4.2`. Este projeto é uma implementação clean-room do mesmo protocolo Cookie + campaign + reward. Comece com `--query`.
 
 ## 🚀 Configuração mínima
 
@@ -105,14 +105,14 @@ Para ativar o agendamento, remova os comentários. `15 1 * * *` usa UTC e corres
 
 ## 📊 Critério de sucesso
 
-A resposta do endpoint de resgate não basta. Depois de solicitar a recompensa, o script precisa reler os detalhes e observar `checked_in_today=true` ou `task_status=3`. Se a leitura não confirmar o resultado, a execução é reportada como não confirmada.
+A resposta do endpoint de resgate não basta. Depois de solicitar a recompensa, o script relê os detalhes e aceita somente `checked_in_today=true`. Um valor `task_status=3` não substitui um false explícito. Tarefas pendentes ficam em um ledger substituído atomicamente e protegido por um arquivo de bloqueio fixo para threads e processos.
 
 ## 🔒 Privacidade
 
 - Um Cookie é uma credencial de login.
 - Guarde-o apenas em variáveis de ambiente, GitHub Secrets ou shell local temporário.
 - Não publique cookies em issues, README, releases ou chats.
-- Os logs mascaram o Cookie e o projeto não grava dados da conta no repositório.
+- Os logs mascaram o Cookie e o projeto nunca grava o Cookie em texto puro; apenas um ledger pending mínimo e com hash é persistido.
 - Se um Cookie foi exposto, renove a sessão.
 
 ## Limites de uso e redistribuição

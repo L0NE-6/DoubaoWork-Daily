@@ -3,4 +3,6 @@ __pycache__/
 .env
 *.log
 doubaowork_state.json
+doubaowork_state.json.lock
+doubaowork_state.json.*.tmp
 cookies*.json

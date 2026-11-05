@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: doubaowork-daily
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -20,6 +24,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Restore Doubao Work check-in ledger
+        uses: actions/cache/restore@v4
+        with:
+          path: doubaowork_state.json
+          key: doubaowork-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            doubaowork-state-
       - run: pip install requests
       - name: Run Doubao Work Daily
         env:
@@ -33,3 +44,9 @@ jobs:
           BARK_URL: ${{ secrets.BARK_URL }}
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python doubaowork_daily.py
+      - name: Save Doubao Work check-in ledger
+        if: always() && hashFiles('doubaowork_state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: doubaowork_state.json
+          key: doubaowork-state-${{ github.run_id }}-${{ github.run_attempt }}

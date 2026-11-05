@@ -22,10 +22,10 @@
 - v3 detail または通常の campaign list エンドポイントを選択します。
 - 詳細内に `daily_checkin` がちょうど 1 件ある場合だけ処理します。
 - 受領済み、未配信、条件未達は中立状態として扱います。
-- 受領後に詳細を再取得し、`checked_in_today=true` または `task_status=3` を確認します。
+- 受領後に詳細を再取得し、`checked_in_today=true` のみを完了条件にします。`task_status=3` は明示的な false を上書きしません。
 - 複数アカウント、`--query`、`--only`、PushPlus、Bark、WeCom 通知に対応します。
 
-> 上流 Agent2Providers `v3.3.0-beta.6` の provider は「実装済み・実機未確認」とされています。本プロジェクトは同じ Cookie + campaign + reward プロトコルを clean-room で実装しています。初回は `--query` から開始してください。
+> チェックイン状態機械は Agent2Providers `v3.4.2` の `doubaowork/checkin`、`checkin_state`、`rewards` に合わせています。本プロジェクトは同じ Cookie + campaign + reward プロトコルを clean-room で実装しています。初回は `--query` から開始してください。
 
 ## 🚀 最短セットアップ
 
@@ -105,7 +105,7 @@ pip3 install requests
 
 ## 📊 成功条件
 
-受領 API の応答だけでは成功としません。受領後にキャンペーン詳細を再取得し、`checked_in_today=true` または `task_status=3` を確認する必要があります。再取得で確認できない場合は未確認として報告します。
+受領 API の応答だけでは成功としません。受領後にキャンペーン詳細を再取得し、`checked_in_today=true` のみを完了条件にします。`task_status=3` は明示的な false を上書きしません。未確認タスクは原子的に置換される pending 台帳に保存され、固定のスレッド／プロセスロックファイルで保護されます。
 
 ## 🔒 プライバシー
 

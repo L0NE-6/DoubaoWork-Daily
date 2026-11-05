@@ -22,10 +22,10 @@
 - v3 detail 또는 일반 campaign list 엔드포인트를 선택합니다.
 - 상세 정보에 `daily_checkin` 작업이 정확히 하나 있을 때만 진행합니다.
 - 이미 수령, 캠페인 미배포, 조건 미충족은 중립 상태로 처리합니다.
-- 수령 후 상세를 다시 조회해 `checked_in_today=true` 또는 `task_status=3`을 확인합니다.
+- 수령 후 상세를 다시 조회하며 `checked_in_today=true`만 완료 조건으로 사용합니다. `task_status=3`은 명시적인 false를 덮어쓰지 않습니다.
 - 다중 계정, `--query`, `--only`, PushPlus, Bark, WeCom 알림을 지원합니다.
 
-> 상류 Agent2Providers `v3.3.0-beta.6` provider는 “구현됨, 실계정 미검증”으로 표시되어 있습니다. 이 프로젝트는 동일한 Cookie + campaign + reward 프로토콜을 clean-room 방식으로 구현했습니다. 처음에는 `--query`부터 실행하세요.
+> 체크인 상태 머신은 Agent2Providers `v3.4.2`의 `doubaowork/checkin`, `checkin_state`, `rewards` 의미 체계를 따릅니다. 이 프로젝트는 동일한 Cookie + campaign + reward 프로토콜을 clean-room 방식으로 구현했습니다. 처음에는 `--query`부터 실행하세요.
 
 ## 🚀 최단 설정
 
@@ -105,7 +105,7 @@ pip3 install requests
 
 ## 📊 성공 기준
 
-수령 API 응답만으로 성공을 판단하지 않습니다. 수령 후 캠페인 상세를 다시 조회해 `checked_in_today=true` 또는 `task_status=3`을 확인해야 합니다. 상세 조회로 확인되지 않으면 미확인으로 보고합니다.
+수령 API 응답만으로 성공을 판단하지 않습니다. 수령 후 캠페인 상세를 다시 조회하며 `checked_in_today=true`만 완료 조건으로 사용합니다. `task_status=3`은 명시적인 false를 덮어쓰지 않습니다. 미확인 작업은 원자적으로 교체되는 pending 원장에 저장되고 고정 스레드/프로세스 잠금 파일로 보호됩니다.
 
 ## 🔒 개인정보
 

@@ -47,7 +47,7 @@
 | **输出** | 今日已领、可领取、活动未投放、条件未满足、奖励额度和连续天数。 |
 | **部署** | 青龙面板、GitHub Actions、Windows / Linux 本地运行。 |
 | **依赖** | Python 3 + `requests`；仓库 Actions 使用 Python 3.11。 |
-| **成功判据** | 领取请求成功后重新拉取详情，确认 `checked_in_today=true` 或 `task_status=3`。 |
+| **成功判据** | 领取后以官方详情 `checked_in_today=true` 为唯一完成依据；`task_status=3` 不覆盖明确的 false。 |
 
 **核心能力**
 
@@ -56,9 +56,11 @@
 - 只在详情中存在唯一 `daily_checkin` 任务时继续领取。
 - 已领取、活动未投放和任务未满足条件均按中性状态处理。
 - 领取后强制回查，不把单个业务 `code=0` 当作最终成功。
+- pending 台账在写请求前原子落盘，同日重跑只回查同一 `group/item`，不重复提交领取。
+- 台账使用进程线程锁和 Windows `msvcrt` / Linux `flock` 固定锁文件，跨线程、跨进程串行。
 - 支持多账号、`--query`、`--only` 和 PushPlus / Bark / 企业微信通知。
 
-> 上游 Agent2Providers `v3.3.0-beta.6` 的 `doubaowork` provider 标注为“已实现，待实测”。本脚本按同一条 Cookie + campaign + reward 协议做 clean-room 实现；首次使用建议先执行 `--query`。
+> 协议语义对齐 Agent2Providers `v3.4.2` 的 `doubaowork/checkin`、`checkin_state` 与 `rewards`。本脚本按同一条 Cookie + campaign + reward 协议做 clean-room 实现；首次使用建议先执行 `--query`。
 
 ## 🧭 工作方式
 
@@ -67,12 +69,14 @@ Cookie
   → POST /alice/user/launch
   → campaign detail / list
   → 找唯一 daily_checkin
+  → 固定锁内重读 pending 台账
+  → 无 pending 时原子占用并保存
   → POST /alice/ug/campaign/item/reward/claim/
-  → 重新拉取 detail
-  → checked_in_today=true 或 task_status=3 才算确认
+  → 0 / 2 / 4 秒回查同一 group/item
+  → 仅 checked_in_today=true 才算确认
 ```
 
-脚本只处理 `https://www.doubao.com` 国内站。每日任务必须唯一；活动结构异常或出现多个候选时，脚本会报告无法确认，而不是猜测领取对象。
+脚本只处理 `https://www.doubao.com` 国内站。每日任务必须唯一；活动结构异常或出现多个候选时，脚本会报告无法确认，而不是猜测领取对象。确认预算为 18 秒，未确认任务按 10 分钟间隔、30 分钟窗口和最多 4 轮安排后续只读回查。
 
 ## 🚀 快速开始
 
@@ -119,6 +123,7 @@ python doubaowork_daily.py
 | `python doubaowork_daily.py --query` | 只查询，不提交领取请求 |
 | `python doubaowork_daily.py --only 1` | 只处理第 1 个账号 |
 | `python doubaowork_daily.py --no-notify` | 本轮不发送通知 |
+| `python doubaowork_daily.py --version` | 显示脚本版本 |
 
 退出码：`0` 表示本轮没有账号级失败；已领取、活动未投放、条件未满足也属于可解释的中性结果。`1` 表示缺少账号、Cookie 失效、触发限流或至少一个账号发生异常。
 
@@ -157,6 +162,8 @@ pip3 install requests
 需要定时运行时，取消 workflow 中 schedule 两行的注释。示例 `15 1 * * *` 使用 UTC，对应北京时间 09:15。
 
 工作流没有默认透传 `DOUBAOWORK_ACCOUNTS_FILE`、`DOUBAOWORK_USER_AGENT`、`DOUBAOWORK_CLIENT_VERSION` 和 `DOUBAOWORK_NO_NOTIFY`；这些变量可在本地或青龙中使用，或自行在 workflow 中显式添加映射。
+
+工作流使用 `actions/cache/restore` / `actions/cache/save` 保留最小化 pending 台账，并用 `concurrency` 串行同仓运行。Actions 级串行不替代脚本内的固定锁文件。
 
 ## 🔧 环境变量
 
@@ -199,7 +206,8 @@ pip3 install requests
 | `DOUBAOWORK_PROXY` | HTTP(S) / SOCKS5 代理 |
 | `DOUBAOWORK_NO_NOTIFY` | 设为 `1` 时关闭通知 |
 | `DOUBAOWORK_BASE_URL` | 高级；默认 `https://www.doubao.com` |
-| `DOUBAOWORK_STATE_FILE` | 代码中预留，当前主流程未读写该状态文件 |
+| `DOUBAOWORK_STATE_FILE` | pending 台账路径；默认脚本目录下 `doubaowork_state.json` |
+| `DOUBAOWORK_LOCK_FILE` | 固定锁文件路径；默认 `<DOUBAOWORK_STATE_FILE>.lock` |
 | `PUSHPLUS_TOKEN` | PushPlus 令牌 |
 | `BARK_URL` | Bark 服务地址 |
 | `WECOM_WEBHOOK` | 企业微信机器人 webhook，或仅填 key |
@@ -210,11 +218,12 @@ pip3 install requests
 | :--- | :--- |
 | `claimed` | 已提交领取，并在详情回查中确认今日已完成 |
 | `already` | 今日此前已领取 |
+| `confirming` | 领取结果尚未由详情确认，pending 已保留，后续只查询不重提 |
 | `inactive` | 活动未投放、没有唯一每日任务，或尚未满足领取条件 |
 | `available` / `done` | `--query` 下的可领取 / 已领取状态 |
-| 异常 | Cookie 失效、限流、接口失败或领取后回查未确认 |
+| 异常 | Cookie 失效、限流、明确拒绝或领取回执损坏 |
 
-脚本没有账号数据持久化需求；Cookie 与设备信息只从环境变量或账号文件读取。
+脚本只持久化最小化签到台账：账号 Cookie 哈希、`group/item`、提交时间、轮数和奖励提示，不保存 Cookie 明文、device_id、web_id 或完整账号信息。台账更新使用原子替换，并由固定锁文件串行化。
 
 ## ❓ 常见问题
 
@@ -247,12 +256,12 @@ pip3 install requests
 - Cookie 等同于登录态，必须只放在环境变量、GitHub Secrets 或本地临时 shell 中；
 - 不把 Cookie 粘贴到公开 Issue、README、Release 或聊天；
 - 日志只显示脱敏 Cookie 摘要，不输出完整登录态；
-- 本仓库不写入账号数据或运行状态；
+- 本仓库不写入 Cookie、设备标识或完整账号数据；仅写最小化 pending 台账；
 - 如果 Cookie 曾公开，请立即退出对应会话或重新登录使旧 Cookie 失效。
 
 ## 📦 版本与发布
 
-- 当前发布版：`v1.0.1`（2026-11-04，文档发行版；脚本逻辑仍为 `v1.0.0`）。
+- 当前候选版本：`v1.1.0`（待发布；正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
 
 ## ☕ 支持与反馈
 

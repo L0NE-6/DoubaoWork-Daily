@@ -22,10 +22,10 @@
 - 依活動組選擇 v3 detail 或一般 campaign list 介面。
 - 只有詳情中存在唯一 `daily_checkin` 任務時才繼續。
 - 已領取、活動未投放、尚未滿足條件都按中性狀態處理。
-- 領取後重新讀取詳情，必須看到 `checked_in_today=true` 或 `task_status=3`。
+- 領取後重新讀取詳情，只接受 `checked_in_today=true`；`task_status=3` 不會覆蓋明確的 false。
 - 支援多帳號、`--query`、`--only` 與 PushPlus、Bark、企業微信通知。
 
-> 上游 Agent2Providers `v3.3.0-beta.6` 的 provider 標註為「已實作，待實測」。本腳本依相同 Cookie + campaign + reward 協議進行 clean-room 實作，首次使用建議先執行 `--query`。
+> 簽到狀態機對齊 Agent2Providers `v3.4.2` 的 `doubaowork/checkin`、`checkin_state` 與 `rewards`。本腳本依相同 Cookie + campaign + reward 協議進行 clean-room 實作，首次使用建議先執行 `--query`。
 
 ## 🚀 最短可行設定
 
@@ -105,7 +105,7 @@ pip3 install requests
 
 ## 📊 成功判據
 
-領取介面回傳成功不是最終依據。送出領取後必須重新讀取活動詳情，確認 `checked_in_today=true` 或 `task_status=3`；回查未確認時會明確標記，不會偽報成功。
+領取介面回傳成功不是最終依據。送出領取後會重新讀取活動詳情，只接受 `checked_in_today=true`；`task_status=3` 不會覆蓋明確的 false。待確認任務保存在原子替換的 pending 台帳中，並由固定執行緒／跨程序鎖檔案保護。
 
 ## 🔒 隱私與安全
 

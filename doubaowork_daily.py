@@ -3,15 +3,16 @@
 """
 豆包工作每日奖励 - 青龙 / GitHub Actions 单文件脚本
 
-协议依据：Agent2API Agent2Providers v3.3.0-beta.6 的 doubaowork provider。
+协议依据：Agent2API Agent2Providers v3.4.2 的 doubaowork provider。
 本脚本是独立的 clean-room 实现，不依赖 3.3 插件进程，也不复制其源码。
 
 流程：
   Cookie -> POST /alice/user/launch
          -> POST /alice/ug/campaign/v3/detail/（或 /campaign/list/）
          -> 找唯一 daily_checkin 任务
+         -> 先把 pending 原子写入状态文件
          -> POST /alice/ug/campaign/item/reward/claim/
-         -> 重新拉 detail，确认 checked_in_today=true / task_status=3
+         -> 0/2/4 秒回查同一任务，只认 checked_in_today=true
 
 环境变量：
   DOUBAOWORK_COOKIES    多账号，每行一个：备注|sessionid=...; sessionid_ss=...
@@ -20,6 +21,8 @@
   DOUBAOWORK_DEVICE_ID / WEB_ID / FINGERPRINT  可选，Cookie 里没有时补充
   DOUBAOWORK_USER_AGENT / CLIENT_VERSION        可选
   DOUBAOWORK_PROXY      可选代理
+  DOUBAOWORK_STATE_FILE  可选 pending 台账路径
+  DOUBAOWORK_LOCK_FILE   可选固定锁文件路径
   DOUBAOWORK_NO_NOTIFY=1  关闭通知
 
 命令：
@@ -27,21 +30,29 @@
   python doubaowork_daily.py --query
   python doubaowork_daily.py --only 1
   python doubaowork_daily.py --no-notify
+  python doubaowork_daily.py --version
 
 依赖：requests
 """
 
 import argparse
+import errno
+import hashlib
 import json
+import math
 import os
 import re
 import sys
+import tempfile
+import threading
 import time
-import urllib3
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import requests
+import urllib3
 
 urllib3.disable_warnings()
 
@@ -64,10 +75,24 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.getenv("DOUBAOWORK_STATE_FILE", "").strip() or os.path.join(
     SCRIPT_DIR, "doubaowork_state.json"
 )
+__version__ = "1.1.0"
+STATE_VERSION = 1
+CONFIRM_BUDGET_SECONDS = 18.0
+CONFIRM_POLL_DELAYS = (0.0, 2.0, 4.0)
+RETRY_GAP_MS = 10 * 60 * 1000
+CONFIRM_WINDOW_MS = 30 * 60 * 1000
+MAX_ROUNDS = 4
+DIRECT_REJECT_STATUSES = frozenset((401, 403, 429))
+CONDITIONAL_REJECT_STATUSES = frozenset((400, 404, 405, 422))
+AUTH_BUSINESS_CODES = frozenset((710012001,))
+RATE_LIMIT_BUSINESS_CODES = frozenset((710022004,))
+EXPLICIT_REJECT_BUSINESS_CODES = AUTH_BUSINESS_CODES | RATE_LIMIT_BUSINESS_CODES
+CONFIRMING_MARKERS = ("领取结果确认中", "确认中", "稍后重试")
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class DoubaoError(RuntimeError):
-    def __init__(self, message: str, status: int = 0, code: Optional[int] = None):
+    def __init__(self, message: str, status: int = 0, code: Any = None):
         super().__init__(message)
         self.status = int(status or 0)
         self.code = code
@@ -108,12 +133,14 @@ def number(value: Any) -> Optional[float]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     if isinstance(value, str):
         try:
-            return float(value.strip())
+            parsed = float(value.strip())
         except (TypeError, ValueError):
             return None
+        return parsed if math.isfinite(parsed) else None
     return None
 
 
@@ -122,6 +149,35 @@ def integer(value: Any) -> Optional[int]:
     if parsed is None:
         return None
     return int(parsed)
+
+
+def exact_integer(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value.is_integer() else None
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"[+-]?[0-9]+", text):
+            return int(text)
+    return None
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def beijing_date_key(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(timestamp_ms / 1000, BEIJING_TZ).strftime("%Y-%m-%d")
+
+
+def _valid_date_key(value: str) -> bool:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value
+    except (TypeError, ValueError):
+        return False
 
 
 def _cookie_pairs_from_json(value: Any) -> List[Tuple[str, str]]:
@@ -137,7 +193,12 @@ def _cookie_pairs_from_json(value: Any) -> List[Tuple[str, str]]:
                 continue
             domain = str(item.get("domain") or "")
             path = str(item.get("path") or "/")
-            if domain and domain not in ("doubao.com", ".doubao.com", "www.doubao.com", ".www.doubao.com"):
+            if domain and domain not in (
+                "doubao.com",
+                ".doubao.com",
+                "www.doubao.com",
+                ".www.doubao.com",
+            ):
                 continue
             if path not in ("", "/"):
                 continue
@@ -176,7 +237,9 @@ def parse_cookie(raw: str) -> Dict[str, str]:
         if value:
             result[name] = value
     if not any(result.get(name) for name in ("sessionid", "sessionid_ss")):
-        raise DoubaoAuthError("Cookie 缺少 sessionid / sessionid_ss，请重新登录豆包工作后复制完整 Cookie")
+        raise DoubaoAuthError(
+            "Cookie 缺少 sessionid / sessionid_ss，请重新登录豆包工作后复制完整 Cookie"
+        )
     size = sum(len(name) + len(value) + 3 for name, value in result.items())
     if size > 128 * 1024:
         raise DoubaoError("Cookie 过长")
@@ -198,6 +261,204 @@ class Account:
     web_id: str = ""
     fingerprint: str = ""
     proxy: str = ""
+
+
+def account_ledger_key(account: Account) -> str:
+    identity = account.cookie_pairs.get("sessionid") or account.cookie_pairs.get("sessionid_ss")
+    if not identity:
+        raise DoubaoError("账号缺少可用于签到台账的身份 Cookie")
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class PendingAttempt:
+    group: str
+    item: str
+    submitted_at: int
+    rounds: int
+    points: Optional[float]
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "PendingAttempt":
+        if not isinstance(value, dict):
+            raise _invalid_ledger()
+        group = value.get("group")
+        item = value.get("item")
+        submitted_at = value.get("submitted_at")
+        rounds = value.get("rounds")
+        points = value.get("points")
+        if not isinstance(group, str) or not group.strip():
+            raise _invalid_ledger()
+        if not isinstance(item, str) or not item.strip():
+            raise _invalid_ledger()
+        if not isinstance(submitted_at, int) or isinstance(submitted_at, bool) or submitted_at <= 0:
+            raise _invalid_ledger()
+        if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
+            raise _invalid_ledger()
+        if points is not None:
+            parsed_points = number(points)
+            if parsed_points is None or parsed_points < 0:
+                raise _invalid_ledger()
+            points = parsed_points
+        return cls(group.strip(), item.strip(), submitted_at, rounds, points)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "group": self.group,
+            "item": self.item,
+            "submitted_at": self.submitted_at,
+            "rounds": self.rounds,
+            "points": self.points,
+        }
+
+    def retry_at(self, at_ms: int) -> Optional[int]:
+        next_at = at_ms + RETRY_GAP_MS
+        in_window = next_at <= self.submitted_at + CONFIRM_WINDOW_MS
+        same_day = beijing_date_key(next_at) == beijing_date_key(at_ms)
+        return next_at if self.rounds < MAX_ROUNDS and in_window and same_day else None
+
+
+@dataclass
+class LedgerEntry:
+    day: str
+    pending: Optional[PendingAttempt]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "day": self.day,
+            "pending": self.pending.to_dict() if self.pending else None,
+        }
+
+
+def _invalid_ledger() -> DoubaoError:
+    return DoubaoError(
+        "豆包工作签到记录无效，已停止提交领取以避免重复操作",
+        500,
+    )
+
+
+_LEDGER_THREAD_LOCK = threading.Lock()
+
+
+def ledger_lock_path(state_path: str) -> str:
+    custom = os.getenv("DOUBAOWORK_LOCK_FILE", "").strip()
+    return os.path.abspath(custom or state_path + ".lock")
+
+
+@contextmanager
+def _ledger_lock(lock_path: str):
+    """Serialize ledger access across threads and processes with one fixed file."""
+    directory = os.path.dirname(os.path.abspath(lock_path))
+    os.makedirs(directory, exist_ok=True)
+    with _LEDGER_THREAD_LOCK:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        os.lseek(descriptor, 0, os.SEEK_SET)
+                        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as error:
+                        if error.errno not in (
+                            errno.EACCES,
+                            errno.EAGAIN,
+                            errno.EDEADLK,
+                        ):
+                            raise
+                        time.sleep(0.05)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _atomic_write_json(path: str, value: Dict[str, Any]) -> None:
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temp_path = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".",
+        suffix=".tmp",
+        dir=directory,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+class CheckinLedgerStore:
+    def __init__(
+        self,
+        path: str,
+        account_key: str,
+        now_ms_fn: Callable[[], int] = now_ms,
+    ):
+        if not account_key:
+            raise DoubaoError("豆包工作签到台账缺少账号标识", 500)
+        self.path = os.path.abspath(path)
+        self.account_key = account_key
+        self.now_ms_fn = now_ms_fn
+        self.document = self._load_document()
+
+    def _load_document(self) -> Dict[str, Any]:
+        if not os.path.exists(self.path):
+            return {"version": STATE_VERSION, "accounts": {}}
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+        except json.JSONDecodeError as error:
+            raise _invalid_ledger() from error
+        if not isinstance(value, dict):
+            raise _invalid_ledger()
+        accounts = value.get("accounts")
+        if value.get("version") != STATE_VERSION or not isinstance(accounts, dict):
+            raise _invalid_ledger()
+        return value
+
+    def load(self) -> LedgerEntry:
+        today = beijing_date_key(self.now_ms_fn())
+        stored = self.document["accounts"].get(self.account_key)
+        if stored is None:
+            return LedgerEntry(today, None)
+        if not isinstance(stored, dict):
+            raise _invalid_ledger()
+        day = stored.get("day")
+        if not isinstance(day, str) or not _valid_date_key(day):
+            raise _invalid_ledger()
+        if day > today:
+            raise DoubaoError("系统日期早于豆包工作签到记录，请先校准时间", 500)
+        if day < today:
+            return LedgerEntry(today, None)
+        pending_value = stored.get("pending")
+        pending = None
+        if pending_value is not None:
+            pending = PendingAttempt.from_dict(pending_value)
+            if beijing_date_key(pending.submitted_at) != day:
+                raise _invalid_ledger()
+        return LedgerEntry(day, pending)
+
+    def save(self, entry: LedgerEntry) -> None:
+        self.document["accounts"][self.account_key] = entry.to_dict()
+        _atomic_write_json(self.path, self.document)
 
 
 def _account_from_cookie(name: str, cookie: str) -> Account:
@@ -232,24 +493,39 @@ def load_accounts() -> List[Account]:
                 cookie = first_text(row, ("cookie", "cookieHeader", "cookie_header"))
                 if not cookie:
                     continue
-                account = _account_from_cookie(first_text(row, ("name", "备注")) or "账号%d" % index, cookie)
-                for key in ("userAgent", "user_agent", "clientVersion", "client_version",
-                            "deviceId", "device_id", "webId", "web_id",
-                            "fingerprint", "proxy"):
+                account = _account_from_cookie(
+                    first_text(row, ("name", "备注")) or "账号%d" % index, cookie
+                )
+                for key in (
+                    "userAgent",
+                    "user_agent",
+                    "clientVersion",
+                    "client_version",
+                    "deviceId",
+                    "device_id",
+                    "webId",
+                    "web_id",
+                    "fingerprint",
+                    "proxy",
+                ):
                     value = first_text(row, (key,))
                     if value:
-                        setattr(account, {
-                            "userAgent": "user_agent",
-                            "user_agent": "user_agent",
-                            "clientVersion": "client_version",
-                            "client_version": "client_version",
-                            "deviceId": "device_id",
-                            "device_id": "device_id",
-                            "webId": "web_id",
-                            "web_id": "web_id",
-                            "fingerprint": "fingerprint",
-                            "proxy": "proxy",
-                        }[key], value)
+                        setattr(
+                            account,
+                            {
+                                "userAgent": "user_agent",
+                                "user_agent": "user_agent",
+                                "clientVersion": "client_version",
+                                "client_version": "client_version",
+                                "deviceId": "device_id",
+                                "device_id": "device_id",
+                                "webId": "web_id",
+                                "web_id": "web_id",
+                                "fingerprint": "fingerprint",
+                                "proxy": "proxy",
+                            }[key],
+                            value,
+                        )
                 accounts.append(account)
         except Exception as error:
             log("⚠️ 读取 DOUBAOWORK_ACCOUNTS_FILE 失败: %s" % str(error)[:100])
@@ -279,8 +555,9 @@ def load_accounts() -> List[Account]:
 
 
 class DoubaoClient:
-    def __init__(self, account: Account, session: Optional[requests.Session] = None,
-                 base_url: str = BASE_URL):
+    def __init__(
+        self, account: Account, session: Optional[requests.Session] = None, base_url: str = BASE_URL
+    ):
         self.account = account
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
@@ -329,13 +606,13 @@ class DoubaoClient:
             "Accept": "application/json, text/plain, */*",
         }
 
-    def post(self, path: str, body: Any) -> Dict[str, Any]:
+    def post(self, path: str, body: Any, timeout: float = 30.0) -> Dict[str, Any]:
         response = self.session.post(
             self.base_url + path,
             params=self.query_params(),
             headers=self._headers(),
             json=body,
-            timeout=30,
+            timeout=timeout,
             verify=False,
         )
         try:
@@ -353,10 +630,18 @@ class DoubaoClient:
             detail = payload.get("error_detail") or payload.get("error") or payload
             message = first_text(detail, ("message", "msg", "error_msg", "error_message", "detail"))
             message = message or first_text(payload, ("msg", "message")) or "豆包工作接口失败"
-            if response.status_code == 401 or code == 710012001 or "not logged in" in message.lower():
-                raise DoubaoAuthError("豆包工作登录态已失效，请重新登录", response.status_code, code)
+            if (
+                response.status_code == 401
+                or code == 710012001
+                or "not logged in" in message.lower()
+            ):
+                raise DoubaoAuthError(
+                    "豆包工作登录态已失效，请重新登录", response.status_code, code
+                )
             if response.status_code == 429 or code == 710022004:
-                raise DoubaoRateLimitError("豆包工作触发限流，请稍后重试", response.status_code, code)
+                raise DoubaoRateLimitError(
+                    "豆包工作触发限流，请稍后重试", response.status_code, code
+                )
             raise DoubaoError("豆包工作：%s" % message, response.status_code, code)
         return payload
 
@@ -377,14 +662,22 @@ def _walk_tasks(value: Any, group: str, output: List[Dict[str, Any]], depth: int
                 continue
             row_group = first_text(row, ("campaign_group_code",)) or current_group
             daily_info = row.get("daily_checkin")
-            daily = isinstance(daily_info, dict) and isinstance(daily_info.get("checked_in_today"), bool)
-            checked = bool(isinstance(daily_info, dict) and daily_info.get("checked_in_today") is True)
+            daily = isinstance(daily_info, dict) and isinstance(
+                daily_info.get("checked_in_today"), bool
+            )
+            checked = bool(
+                isinstance(daily_info, dict) and daily_info.get("checked_in_today") is True
+            )
             state = integer(row.get("task_status")) or 0
             direct = integer(row.get("reward_mode")) == 2 or key == "milestones"
             body = None
             if state == 2 or (daily and direct and state in (1, 4)):
                 if direct:
-                    body = {"task_id": "", "campaign_group_code": row_group, "campaign_item_code": item}
+                    body = {
+                        "task_id": "",
+                        "campaign_group_code": row_group,
+                        "campaign_item_code": item,
+                    }
                 else:
                     task_id = first_text(row, ("task_id",))
                     if task_id:
@@ -407,9 +700,13 @@ def _walk_tasks(value: Any, group: str, output: List[Dict[str, Any]], depth: int
                 "checked": checked,
                 "body": body,
                 "points": points,
-                "streak": integer(daily_info.get("continuous_days")) if isinstance(daily_info, dict) else None,
+                "streak": integer(daily_info.get("continuous_days"))
+                if isinstance(daily_info, dict)
+                else None,
             }
-            if not any(old["key"] == task["key"] and old["group"] == task["group"] for old in output):
+            if not any(
+                old["key"] == task["key"] and old["group"] == task["group"] for old in output
+            ):
                 output.append(task)
     child = value.get("campaign_group")
     if isinstance(child, dict):
@@ -441,22 +738,42 @@ def _detail_path(group: str) -> str:
     return "/alice/ug/campaign/v3/detail/" if group == V3_GROUP else "/alice/ug/campaign/list/"
 
 
-def _receipt_confirmed(payload: Dict[str, Any]) -> bool:
+def _campaign_detail(client: DoubaoClient, group: str, timeout: float = 30.0) -> Dict[str, Any]:
+    value = client.post(
+        _detail_path(group),
+        {"campaign_group_code": group},
+        timeout=timeout,
+    )
+    data = value.get("data")
+    if isinstance(data, dict):
+        campaign_code = first_text(data, ("campaign_code",))
+        if group == V3_GROUP and campaign_code and campaign_code != group:
+            raise DoubaoError("豆包工作返回了不匹配的活动组", 502)
+    return value
+
+
+def _validate_receipt(payload: Dict[str, Any]) -> bool:
     data = payload.get("data")
     if not isinstance(data, dict):
         raise DoubaoError("豆包工作未返回奖励领取回执")
     if data.get("success") is False:
-        raise DoubaoError("豆包工作奖励领取被拒绝")
+        raise DoubaoError("豆包工作奖励领取被拒绝", code="reward_rejected")
     biz = data.get("biz_error")
-    if isinstance(biz, dict):
-        code = integer(biz.get("code"))
-        if code not in (0, 4, 6, None):
-            raise DoubaoError(first_text(biz, ("message", "msg")) or "豆包工作奖励领取失败")
+    if biz is not None:
+        if not isinstance(biz, dict):
+            raise DoubaoError("豆包工作奖励领取回执的 biz_error 格式无效")
+        code = exact_integer(biz.get("code"))
+        if code not in (0, 4, 6):
+            raise DoubaoError(
+                first_text(biz, ("message", "msg")) or "豆包工作奖励领取回执缺少可确认的业务码"
+            )
     return (
         integer(data.get("task_status")) == 3
         or data.get("checked_in_today") is True
-        or (isinstance(data.get("daily_checkin"), dict)
-            and data["daily_checkin"].get("checked_in_today") is True)
+        or (
+            isinstance(data.get("daily_checkin"), dict)
+            and data["daily_checkin"].get("checked_in_today") is True
+        )
     )
 
 
@@ -469,38 +786,278 @@ def _daily_task(payload: Dict[str, Any], group: str) -> Tuple[Optional[Dict[str,
     return rows[0], ""
 
 
-def claim_daily(client: DoubaoClient) -> Dict[str, Any]:
+def _pending_task(payload: Dict[str, Any], attempt: PendingAttempt) -> Dict[str, Any]:
+    for row in collect_tasks(payload, attempt.group):
+        if row["daily"] and row["key"] == attempt.item and row["group"] == attempt.group:
+            return row
+    raise DoubaoError(
+        "豆包工作回查未返回原签到任务，尚未确认到账；再次执行只查询结果",
+        502,
+    )
+
+
+def _is_explicit_reject_error(error: DoubaoError) -> bool:
+    business_code = exact_integer(error.code)
+    return (
+        error.code == "reward_rejected"
+        or isinstance(error, (DoubaoAuthError, DoubaoRateLimitError))
+        or error.status in DIRECT_REJECT_STATUSES
+        or business_code in EXPLICIT_REJECT_BUSINESS_CODES
+    )
+
+
+def _is_confirming_error(error: DoubaoError) -> bool:
+    if _is_explicit_reject_error(error):
+        return False
+    message = str(error).strip()
+    prefix = "豆包工作："
+    if message.startswith(prefix):
+        message = message[len(prefix) :]
+    return any(marker in message for marker in CONFIRMING_MARKERS)
+
+
+def _is_rejected_error(error: DoubaoError) -> bool:
+    if _is_explicit_reject_error(error):
+        return True
+    return error.status in CONDITIONAL_REJECT_STATUSES and not _is_confirming_error(error)
+
+
+def _ensure_ledger_day(entry: LedgerEntry, now_ms_fn: Callable[[], int]) -> None:
+    if beijing_date_key(now_ms_fn()) != entry.day:
+        raise DoubaoError(
+            "签到确认已跨过北京时间零点，未将昨日结果计为今日签到，请重新查询今日活动",
+            409,
+        )
+
+
+def _clear_pending(store: CheckinLedgerStore, entry: LedgerEntry) -> None:
+    previous = entry.pending
+    entry.pending = None
+    try:
+        store.save(entry)
+    except (DoubaoError, OSError) as error:
+        entry.pending = previous
+        log("⚠️ 清除豆包工作待确认签到记录失败: %s" % error)
+
+
+def _completed_result(
+    task: Dict[str, Any],
+    submitted_now: bool,
+    points: Optional[float],
+) -> Dict[str, Any]:
+    if submitted_now:
+        return {
+            "status": "claimed",
+            "message": "豆包工作签到奖励已领取，已回查确认",
+            "points": task["points"] if points is None else points,
+            "streak": task["streak"],
+            "completed": True,
+            "query_only": False,
+            "retry_at": None,
+        }
+    return {
+        "status": "done",
+        "message": "今日已领取豆包工作签到奖励，已由官方确认",
+        "points": None,
+        "streak": task["streak"],
+        "completed": True,
+        "query_only": False,
+        "retry_at": None,
+    }
+
+
+def _reconcile_pending(
+    client: DoubaoClient,
+    store: CheckinLedgerStore,
+    entry: LedgerEntry,
+    submitted_now: bool,
+    now_ms_fn: Callable[[], int],
+    monotonic_fn: Callable[[], float],
+    sleep_fn: Callable[[float], None],
+) -> Dict[str, Any]:
+    attempt = entry.pending
+    if attempt is None:
+        raise DoubaoError("豆包工作缺少待确认任务，未提交领取", 500)
+    deadline = monotonic_fn() + CONFIRM_BUDGET_SECONDS
+    queried = False
+    for delay in CONFIRM_POLL_DELAYS:
+        if delay > 0:
+            sleep_fn(delay)
+        remaining = deadline - monotonic_fn()
+        if remaining <= 0:
+            raise DoubaoError(
+                "豆包工作签到结果查询超时；领取记录已保留，再次执行只查询结果",
+                504,
+            )
+        _ensure_ledger_day(entry, now_ms_fn)
+        payload = _campaign_detail(client, attempt.group, timeout=max(0.1, remaining))
+        if monotonic_fn() > deadline:
+            raise DoubaoError(
+                "豆包工作签到结果查询超时；领取记录已保留，再次执行只查询结果",
+                504,
+            )
+        _ensure_ledger_day(entry, now_ms_fn)
+        task = _pending_task(payload, attempt)
+        queried = True
+        if task["checked"] is True:
+            result = _completed_result(task, submitted_now, attempt.points)
+            _clear_pending(store, entry)
+            return result
+        if attempt.retry_at(now_ms_fn()) is None:
+            break
+    retry_at = attempt.retry_at(now_ms_fn())
+    message = (
+        "豆包工作领取结果待确认，稍后只查询结果，不会重复提交领取"
+        if retry_at is not None
+        else "豆包工作今日领取仍未确认，请前往官方客户端查看；再次执行仅查询结果，不会重复领取"
+    )
+    return {
+        "status": "confirming",
+        "message": message,
+        "points": None,
+        "streak": None,
+        "completed": False,
+        "query_only": True,
+        "retry_at": retry_at if queried else None,
+    }
+
+
+def claim_daily(
+    client: DoubaoClient,
+    state_path: Optional[str] = None,
+    lock_path: Optional[str] = None,
+    account_key: Optional[str] = None,
+    now_ms_fn: Callable[[], int] = now_ms,
+    monotonic_fn: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Dict[str, Any]:
+    key = account_key or account_ledger_key(client.account)
+    ledger_path = state_path or STATE_FILE
+    with _ledger_lock(lock_path or ledger_lock_path(ledger_path)):
+        store = CheckinLedgerStore(ledger_path, key, now_ms_fn)
+        entry = store.load()
+        return _claim_daily_locked(
+            client,
+            store,
+            entry,
+            now_ms_fn,
+            monotonic_fn,
+            sleep_fn,
+        )
+
+
+def _claim_daily_locked(
+    client: DoubaoClient,
+    store: CheckinLedgerStore,
+    entry: LedgerEntry,
+    now_ms_fn: Callable[[], int],
+    monotonic_fn: Callable[[], float],
+    sleep_fn: Callable[[float], None],
+) -> Dict[str, Any]:
+    if entry.pending is not None:
+        entry.pending.rounds = min(MAX_ROUNDS, entry.pending.rounds + 1)
+        store.save(entry)
+        return _reconcile_pending(
+            client,
+            store,
+            entry,
+            False,
+            now_ms_fn,
+            monotonic_fn,
+            sleep_fn,
+        )
+
     launch = client.post("/alice/user/launch", {})
     group = _activity_group(launch)
     if not group:
-        return {"status": "inactive", "message": "当前没有豆包工作签到活动", "points": None, "streak": None}
-    detail = client.post(_detail_path(group), {"campaign_group_code": group})
-    task, error = _daily_task(detail, group)
-    if error:
-        return {"status": "inactive", "message": error, "points": None, "streak": None}
-    if task["checked"] or task["state"] == 3:
-        return {"status": "already", "message": "今日已领取豆包工作签到奖励",
-                "points": task["points"], "streak": task["streak"]}
+        return {
+            "status": "inactive",
+            "message": "当前没有豆包工作签到活动",
+            "points": None,
+            "streak": None,
+            "completed": False,
+            "query_only": False,
+            "retry_at": None,
+        }
+    detail = _campaign_detail(client, group)
+    daily_tasks = [row for row in collect_tasks(detail, group) if row["daily"]]
+    if len(daily_tasks) > 1:
+        raise DoubaoError(
+            "豆包工作返回了多个每日签到任务，无法确定领取对象，未提交领取",
+            502,
+        )
+    if not daily_tasks:
+        return {
+            "status": "inactive",
+            "message": "当前活动未提供每日签到任务",
+            "points": None,
+            "streak": None,
+            "completed": False,
+            "query_only": False,
+            "retry_at": None,
+        }
+    task = daily_tasks[0]
+    _ensure_ledger_day(entry, now_ms_fn)
+    if task["checked"] is True:
+        return {
+            "status": "already",
+            "message": "今日已领取豆包工作签到奖励",
+            "points": task["points"],
+            "streak": task["streak"],
+            "completed": True,
+            "query_only": False,
+            "retry_at": None,
+        }
     if not task["body"]:
-        return {"status": "inactive", "message": "今日签到任务尚未满足领取条件",
-                "points": task["points"], "streak": task["streak"]}
-    response = client.post(CLAIM_PATH, task["body"])
-    confirmed = _receipt_confirmed(response)
-    fresh = client.post(_detail_path(group), {"campaign_group_code": group})
-    after_task, _ = _daily_task(fresh, group)
-    if not after_task or not (after_task["checked"] or after_task["state"] == 3):
-        if confirmed:
-            raise DoubaoError("豆包工作已接受领取，但回查尚未确认今日签到；稍后重试不会重复发奖")
-        raise DoubaoError("豆包工作未确认今日签到奖励，请稍后重试或前往官方活动页")
-    points = number((response.get("data") or {}).get("reward_amount"))
-    if points is None:
-        points = after_task["points"] if after_task else task["points"]
-    return {
-        "status": "claimed",
-        "message": "豆包工作签到奖励已领取，已回查确认",
-        "points": points,
-        "streak": after_task.get("streak") if after_task else task["streak"],
-    }
+        return {
+            "status": "inactive",
+            "message": "今日签到任务尚未满足领取条件",
+            "points": task["points"],
+            "streak": task["streak"],
+            "completed": False,
+            "query_only": False,
+            "retry_at": None,
+        }
+
+    entry.pending = PendingAttempt(
+        group=task["group"],
+        item=task["key"],
+        submitted_at=now_ms_fn(),
+        rounds=1,
+        points=task["points"],
+    )
+    store.save(entry)
+    _ensure_ledger_day(entry, now_ms_fn)
+
+    try:
+        response = client.post(CLAIM_PATH, task["body"])
+    except DoubaoError as error:
+        if not _is_confirming_error(error):
+            if _is_rejected_error(error):
+                _clear_pending(store, entry)
+            raise
+        response = None
+    try:
+        if response is not None:
+            _validate_receipt(response)
+    except DoubaoError as error:
+        if _is_rejected_error(error):
+            _clear_pending(store, entry)
+        raise
+    if response is not None:
+        reward = response.get("data")
+        received_points = number(reward.get("reward_amount")) if isinstance(reward, dict) else None
+        if received_points is not None and entry.pending is not None:
+            entry.pending.points = received_points
+    return _reconcile_pending(
+        client,
+        store,
+        entry,
+        True,
+        now_ms_fn,
+        monotonic_fn,
+        sleep_fn,
+    )
 
 
 def query_daily(client: DoubaoClient) -> Dict[str, Any]:
@@ -508,16 +1065,20 @@ def query_daily(client: DoubaoClient) -> Dict[str, Any]:
     group = _activity_group(launch)
     if not group:
         return {"status": "inactive", "message": "当前没有豆包工作签到活动"}
-    detail = client.post(_detail_path(group), {"campaign_group_code": group})
+    detail = _campaign_detail(client, group)
     task, error = _daily_task(detail, group)
     if error:
         return {"status": "inactive", "message": error}
+    checked = task["checked"] is True
     return {
-        "status": "done" if task["checked"] or task["state"] == 3 else "available",
-        "message": "今日已领取" if task["checked"] or task["state"] == 3 else "今日可领取",
+        "status": "done" if checked else "available",
+        "message": "今日已领取" if checked else "今日尚未确认领取",
         "points": task["points"],
         "streak": task["streak"],
         "title": task["title"],
+        "completed": checked,
+        "query_only": True,
+        "retry_at": None,
     }
 
 
@@ -527,12 +1088,19 @@ def notify(title: str, content: str) -> None:
     token = os.getenv("PUSHPLUS_TOKEN", "").strip()
     if token:
         try:
-            response = requests.Session().post(
-                "https://www.pushplus.plus/send",
-                json={"token": token, "title": title, "content": content, "template": "txt"},
-                timeout=15,
-            ).json()
-            log("📢 PushPlus: %s" % ("成功" if response.get("code") == 200 else str(response.get("msg", ""))[:60]))
+            response = (
+                requests.Session()
+                .post(
+                    "https://www.pushplus.plus/send",
+                    json={"token": token, "title": title, "content": content, "template": "txt"},
+                    timeout=15,
+                )
+                .json()
+            )
+            log(
+                "📢 PushPlus: %s"
+                % ("成功" if response.get("code") == 200 else str(response.get("msg", ""))[:60])
+            )
         except Exception as error:
             log("📢 PushPlus 异常: %s" % str(error)[:60])
     bark = os.getenv("BARK_URL", "").strip().rstrip("/")
@@ -547,7 +1115,11 @@ def notify(title: str, content: str) -> None:
         try:
             if not wecom.startswith("http"):
                 wecom = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=" + wecom
-            requests.Session().post(wecom, json={"msgtype": "text", "text": {"content": title + "\n" + content}}, timeout=15)
+            requests.Session().post(
+                wecom,
+                json={"msgtype": "text", "text": {"content": title + "\n" + content}},
+                timeout=15,
+            )
             log("📢 企业微信: 已发送")
         except Exception as error:
             log("📢 企业微信异常: %s" % str(error)[:60])
@@ -555,6 +1127,7 @@ def notify(title: str, content: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="豆包工作每日奖励")
+    parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     parser.add_argument("--query", action="store_true", help="只查询，不领取")
     parser.add_argument("--only", type=int, default=0, help="只跑第 N 个账号")
     parser.add_argument("--no-notify", action="store_true", help="关闭通知")
@@ -568,7 +1141,7 @@ def main() -> int:
         log("   格式：备注|sessionid=...; sessionid_ss=...")
         return 1
     if args.only:
-        accounts = accounts[max(0, args.only - 1):args.only]
+        accounts = accounts[max(0, args.only - 1) : args.only]
     if not accounts:
         log("❌ --only 超出账号范围")
         return 1
@@ -588,11 +1161,14 @@ def main() -> int:
                 log("   🎁 奖励额度: %s" % result["points"])
             if result.get("streak") is not None:
                 log("   🔥 连签: %s 天" % result["streak"])
-            lines.append("%s: %s%s" % (
-                account.name,
-                message,
-                "（%s 额度）" % result["points"] if result.get("points") is not None else "",
-            ))
+            lines.append(
+                "%s: %s%s"
+                % (
+                    account.name,
+                    message,
+                    "（%s 额度）" % result["points"] if result.get("points") is not None else "",
+                )
+            )
             if status in ("error", "auth"):
                 failed += 1
         except DoubaoAuthError as error:

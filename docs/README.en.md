@@ -22,10 +22,10 @@
 - Chooses the v3 campaign detail endpoint or the regular campaign list endpoint.
 - Continues only when exactly one `daily_checkin` task is present.
 - Treats already claimed, campaign not deployed, and conditions not met as neutral states.
-- Re-reads the campaign detail after claiming and requires `checked_in_today=true` or `task_status=3`.
+- Re-reads the campaign detail after claiming and accepts only `checked_in_today=true`; `task_status=3` never overrides an explicit false.
 - Supports multiple accounts, query-only mode, single-account selection, and PushPlus, Bark, and WeCom notifications.
 
-> The upstream Agent2Providers `v3.3.0-beta.6` provider is marked as implemented but not yet live-tested. This project is a clean-room implementation of the same Cookie + campaign + reward protocol. Start with `--query`.
+> The check-in state machine follows Agent2Providers `v3.4.2` `doubaowork/checkin`, `checkin_state`, and `rewards`. This project is a clean-room implementation of the same Cookie + campaign + reward protocol. Start with `--query`.
 
 ## 🚀 Quick start
 
@@ -108,14 +108,14 @@ To enable the schedule, uncomment its two lines. `15 1 * * *` is UTC and corresp
 
 ## 📊 Success criteria
 
-The claim endpoint alone is not the final proof. After submitting the reward request, the script must read the campaign detail again and observe `checked_in_today=true` or `task_status=3`. If the detail cannot confirm the result, the run is reported as unconfirmed.
+The claim endpoint alone is not the final proof. After submitting the reward request, the script reads the campaign detail again and accepts only `checked_in_today=true`. A `task_status=3` value does not override an explicit false result. Pending work is kept in an atomically replaced ledger protected by a fixed thread/process lock file.
 
 ## 🔒 Privacy
 
 - A Cookie is a login credential.
 - Store it only in environment variables, GitHub Secrets, or a temporary local shell.
 - Do not paste cookies into public issues, README files, releases, or chat.
-- The script masks cookies in logs and does not write account data to the repository.
+- The script masks cookies in logs and never writes cookie plaintext. It only persists a minimal hashed pending ledger.
 - Rotate the session if a cookie was exposed.
 
 ## Usage and redistribution
