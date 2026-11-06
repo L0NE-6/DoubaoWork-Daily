@@ -11,8 +11,8 @@
          -> POST /alice/ug/campaign/v3/detail/（或 /campaign/list/）
          -> 找唯一 daily_checkin 任务
          -> 先把 pending 原子写入状态文件
-         -> POST /alice/ug/campaign/item/reward/claim/
-         -> 0/2/4 秒回查同一任务，只认 checked_in_today=true
+         -> POST /alice/ug/campaign/landing/checkin  {"scene": campaign_group_code}
+         -> 回执只认 data.checked_in=true，再以详情 checked_in_today=true 确认
 
 环境变量：
   DOUBAOWORK_COOKIES    多账号，每行一个：备注|sessionid=...; sessionid_ss=...
@@ -70,12 +70,15 @@ DEFAULT_USER_AGENT = (
 DEFAULT_CLIENT_VERSION = "2.33.5"
 RUNTIME_VERSION = "3.42.2"
 V3_GROUP = "pc_incentive_task_mvp_v3"
-CLAIM_PATH = "/alice/ug/campaign/item/reward/claim/"
+LEGACY_CLAIM_PATH = "/alice/ug/campaign/item/reward/claim/"
+CLAIM_PATH = "/alice/ug/campaign/landing/checkin"
+CLAIM_ENDPOINT_ITEM_REWARD = "item_reward"
+CLAIM_ENDPOINT_LANDING_CHECKIN = "landing_checkin"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.getenv("DOUBAOWORK_STATE_FILE", "").strip() or os.path.join(
     SCRIPT_DIR, "doubaowork_state.json"
 )
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 STATE_VERSION = 1
 CONFIRM_BUDGET_SECONDS = 18.0
 CONFIRM_POLL_DELAYS = (0.0, 2.0, 4.0)
@@ -87,6 +90,7 @@ CONDITIONAL_REJECT_STATUSES = frozenset((400, 404, 405, 422))
 AUTH_BUSINESS_CODES = frozenset((710012001,))
 RATE_LIMIT_BUSINESS_CODES = frozenset((710022004,))
 EXPLICIT_REJECT_BUSINESS_CODES = AUTH_BUSINESS_CODES | RATE_LIMIT_BUSINESS_CODES
+OFFICIAL_SYSTEM_ERROR_CODE = 710010702
 CONFIRMING_MARKERS = ("领取结果确认中", "确认中", "稍后重试")
 BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -277,6 +281,8 @@ class PendingAttempt:
     submitted_at: int
     rounds: int
     points: Optional[float]
+    endpoint: str = CLAIM_ENDPOINT_ITEM_REWARD
+    upstream_failure: Optional[int] = None
 
     @classmethod
     def from_dict(cls, value: Any) -> "PendingAttempt":
@@ -287,6 +293,14 @@ class PendingAttempt:
         submitted_at = value.get("submitted_at")
         rounds = value.get("rounds")
         points = value.get("points")
+        endpoint = value.get("endpoint")
+        if endpoint in (None, "", LEGACY_CLAIM_PATH, CLAIM_ENDPOINT_ITEM_REWARD):
+            endpoint = CLAIM_ENDPOINT_ITEM_REWARD
+        elif endpoint in (CLAIM_PATH, CLAIM_ENDPOINT_LANDING_CHECKIN):
+            endpoint = CLAIM_ENDPOINT_LANDING_CHECKIN
+        else:
+            raise _invalid_ledger()
+        upstream_failure = value.get("upstream_failure")
         if not isinstance(group, str) or not group.strip():
             raise _invalid_ledger()
         if not isinstance(item, str) or not item.strip():
@@ -300,7 +314,20 @@ class PendingAttempt:
             if parsed_points is None or parsed_points < 0:
                 raise _invalid_ledger()
             points = parsed_points
-        return cls(group.strip(), item.strip(), submitted_at, rounds, points)
+        if upstream_failure is not None:
+            parsed_failure = exact_integer(upstream_failure)
+            if parsed_failure is None or parsed_failure <= 0:
+                raise _invalid_ledger()
+            upstream_failure = parsed_failure
+        return cls(
+            group.strip(),
+            item.strip(),
+            submitted_at,
+            rounds,
+            points,
+            endpoint,
+            upstream_failure,
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -309,6 +336,8 @@ class PendingAttempt:
             "submitted_at": self.submitted_at,
             "rounds": self.rounds,
             "points": self.points,
+            "endpoint": self.endpoint,
+            "upstream_failure": self.upstream_failure,
         }
 
     def retry_at(self, at_ms: int) -> Optional[int]:
@@ -756,25 +785,22 @@ def _validate_receipt(payload: Dict[str, Any]) -> bool:
     data = payload.get("data")
     if not isinstance(data, dict):
         raise DoubaoError("豆包工作未返回奖励领取回执")
-    if data.get("success") is False:
-        raise DoubaoError("豆包工作奖励领取被拒绝", code="reward_rejected")
     biz = data.get("biz_error")
     if biz is not None:
         if not isinstance(biz, dict):
             raise DoubaoError("豆包工作奖励领取回执的 biz_error 格式无效")
         code = exact_integer(biz.get("code"))
-        if code not in (0, 4, 6):
+        if code != 0:
             raise DoubaoError(
-                first_text(biz, ("message", "msg")) or "豆包工作奖励领取回执缺少可确认的业务码"
+                first_text(biz, ("message", "msg")) or "豆包工作签到回执返回业务错误",
+                code=code,
             )
-    return (
-        integer(data.get("task_status")) == 3
-        or data.get("checked_in_today") is True
-        or (
-            isinstance(data.get("daily_checkin"), dict)
-            and data["daily_checkin"].get("checked_in_today") is True
-        )
-    )
+    checked = data.get("checked_in")
+    if checked is True:
+        return True
+    if checked is False:
+        raise DoubaoError("豆包工作未完成签到，稍后查询官方状态", 502)
+    raise DoubaoError("豆包工作签到回执缺少 checked_in，稍后查询官方状态", 502)
 
 
 def _daily_task(payload: Dict[str, Any], group: str) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -905,6 +931,14 @@ def _reconcile_pending(
             return result
         if attempt.retry_at(now_ms_fn()) is None:
             break
+    if attempt.upstream_failure == OFFICIAL_SYSTEM_ERROR_CODE:
+        _clear_pending(store, entry)
+        raise DoubaoError(
+            "豆包官方签到服务返回系统错误（710010702），回查确认今日仍未签到；"
+            "请稍后重试或在官方客户端查看",
+            502,
+            OFFICIAL_SYSTEM_ERROR_CODE,
+        )
     retry_at = attempt.retry_at(now_ms_fn())
     message = (
         "豆包工作领取结果待确认，稍后只查询结果，不会重复提交领取"
@@ -956,16 +990,28 @@ def _claim_daily_locked(
 ) -> Dict[str, Any]:
     if entry.pending is not None:
         entry.pending.rounds = min(MAX_ROUNDS, entry.pending.rounds + 1)
-        store.save(entry)
-        return _reconcile_pending(
-            client,
-            store,
-            entry,
-            False,
-            now_ms_fn,
-            monotonic_fn,
-            sleep_fn,
-        )
+        if entry.pending.endpoint == CLAIM_ENDPOINT_ITEM_REWARD:
+            _ensure_ledger_day(entry, now_ms_fn)
+            payload = _campaign_detail(client, entry.pending.group)
+            task = _pending_task(payload, entry.pending)
+            if task["checked"] is True:
+                result = _completed_result(task, False, entry.pending.points)
+                _clear_pending(store, entry)
+                return result
+            # 旧版只提交过任务领奖，不能证明每日签到已生效；官方详情仍未勾选时
+            # 清除旧 pending，再走 landing/checkin。
+            _clear_pending(store, entry)
+        else:
+            store.save(entry)
+            return _reconcile_pending(
+                client,
+                store,
+                entry,
+                False,
+                now_ms_fn,
+                monotonic_fn,
+                sleep_fn,
+            )
 
     launch = client.post("/alice/user/launch", {})
     group = _activity_group(launch)
@@ -1008,30 +1054,33 @@ def _claim_daily_locked(
             "query_only": False,
             "retry_at": None,
         }
-    if not task["body"]:
-        return {
-            "status": "inactive",
-            "message": "今日签到任务尚未满足领取条件",
-            "points": task["points"],
-            "streak": task["streak"],
-            "completed": False,
-            "query_only": False,
-            "retry_at": None,
-        }
-
     entry.pending = PendingAttempt(
         group=task["group"],
         item=task["key"],
         submitted_at=now_ms_fn(),
         rounds=1,
         points=task["points"],
+        endpoint=CLAIM_ENDPOINT_LANDING_CHECKIN,
     )
     store.save(entry)
     _ensure_ledger_day(entry, now_ms_fn)
 
     try:
-        response = client.post(CLAIM_PATH, task["body"])
+        response = client.post(CLAIM_PATH, {"scene": task["group"]})
     except DoubaoError as error:
+        if exact_integer(error.code) == OFFICIAL_SYSTEM_ERROR_CODE:
+            if entry.pending is not None:
+                entry.pending.upstream_failure = OFFICIAL_SYSTEM_ERROR_CODE
+                store.save(entry)
+            return _reconcile_pending(
+                client,
+                store,
+                entry,
+                False,
+                now_ms_fn,
+                monotonic_fn,
+                sleep_fn,
+            )
         if not _is_confirming_error(error):
             if _is_rejected_error(error):
                 _clear_pending(store, entry)
@@ -1041,6 +1090,19 @@ def _claim_daily_locked(
         if response is not None:
             _validate_receipt(response)
     except DoubaoError as error:
+        if exact_integer(error.code) == OFFICIAL_SYSTEM_ERROR_CODE:
+            if entry.pending is not None:
+                entry.pending.upstream_failure = OFFICIAL_SYSTEM_ERROR_CODE
+                store.save(entry)
+            return _reconcile_pending(
+                client,
+                store,
+                entry,
+                False,
+                now_ms_fn,
+                monotonic_fn,
+                sleep_fn,
+            )
         if _is_rejected_error(error):
             _clear_pending(store, entry)
         raise
@@ -1049,6 +1111,7 @@ def _claim_daily_locked(
         received_points = number(reward.get("reward_amount")) if isinstance(reward, dict) else None
         if received_points is not None and entry.pending is not None:
             entry.pending.points = received_points
+            store.save(entry)
     return _reconcile_pending(
         client,
         store,

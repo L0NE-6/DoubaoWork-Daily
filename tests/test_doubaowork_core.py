@@ -70,7 +70,7 @@ class LedgerBarrierHandler(http.server.BaseHTTPRequestHandler):
             )
             if path == wb.CLAIM_PATH:
                 self.server.claim_count += 1
-                response = {"code": 0, "data": {"task_status": 3}}
+                response = {"code": 0, "data": {"checked_in": True}}
             elif path == "/alice/user/launch":
                 response = {
                     "code": 0,
@@ -199,7 +199,7 @@ class DoubaoWorkTests(unittest.TestCase):
         with self.assertRaises(wb.DoubaoAuthError):
             wb.parse_cookie("foo=bar")
 
-    def test_collect_tasks_finds_unique_daily_task_and_body(self):
+    def test_collect_tasks_finds_unique_daily_task_and_generic_body(self):
         rows = wb.collect_tasks(detail(), wb.V3_GROUP)
         self.assertEqual(1, len(rows))
         self.assertTrue(rows[0]["daily"])
@@ -245,7 +245,7 @@ class DoubaoWorkTests(unittest.TestCase):
 
         client = FakeClient(
             [detail(), detail(checked=True, state=3)],
-            {"code": 0, "data": {"task_status": 3, "reward_amount": 10}},
+            {"code": 0, "data": {"checked_in": True, "reward_amount": 10}},
             claim_hook=assert_pending_was_saved,
         )
         result = self.claim(client)
@@ -253,20 +253,69 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual(10, result["points"])
         self.assertEqual("daily-checkin", observed["pending"]["item"])
         self.assertEqual(wb.V3_GROUP, observed["pending"]["group"])
+        self.assertEqual("landing_checkin", observed["pending"]["endpoint"])
+        claim_call = next(call for call in client.calls if call[0] == wb.CLAIM_PATH)
+        self.assertEqual({"scene": wb.V3_GROUP}, claim_call[1])
         self.assertIsNone(self.ledger().pending)
 
-    def test_task_status_three_does_not_override_explicit_false(self):
-        client = FakeClient([detail(checked=False, state=3)])
+    def test_detail_task_status_does_not_override_checked_in_state(self):
+        client = FakeClient(
+            [detail(checked=False, state=3), detail(checked=True, state=3)],
+            {"code": 0, "data": {"checked_in": True}},
+        )
         result = self.claim(client)
-        self.assertEqual("inactive", result["status"])
-        self.assertFalse(result["completed"])
-        self.assertEqual(0, client.claim_calls)
+        self.assertEqual("claimed", result["status"])
+        self.assertTrue(result["completed"])
+        self.assertEqual(1, client.claim_calls)
+
+    def test_legacy_pending_is_rechecked_then_migrated_to_landing_endpoint(self):
+        with open(self.state_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "version": wb.STATE_VERSION,
+                    "accounts": {
+                        "account": {
+                            "day": wb.beijing_date_key(NOW_MS),
+                            "pending": {
+                                "group": wb.V3_GROUP,
+                                "item": "daily-checkin",
+                                "submitted_at": NOW_MS,
+                                "rounds": 1,
+                                "points": 10,
+                            },
+                        }
+                    },
+                },
+                handle,
+            )
+        client = FakeClient(
+            [detail(), detail(), detail(checked=True, state=3)],
+            {"code": 0, "data": {"checked_in": True}},
+        )
+
+        result = self.claim(client)
+
+        self.assertEqual("claimed", result["status"])
+        self.assertEqual(1, client.claim_calls)
+        claim_call = next(call for call in client.calls if call[0] == wb.CLAIM_PATH)
+        self.assertEqual({"scene": wb.V3_GROUP}, claim_call[1])
+        self.assertFalse(any(call[0] == wb.LEGACY_CLAIM_PATH for call in client.calls))
+        self.assertIsNone(self.ledger().pending)
+
+    def test_receipt_task_status_three_does_not_replace_checked_in(self):
+        client = FakeClient(
+            [detail()],
+            {"code": 0, "data": {"task_status": 3}},
+        )
+        with self.assertRaises(wb.DoubaoError):
+            self.claim(client)
+        self.assertIsNotNone(self.ledger().pending)
 
     def test_confirming_result_is_returned_and_pending_is_retained(self):
         sleeps = []
         client = FakeClient(
             [detail(), detail(checked=False, state=2)],
-            {"code": 0, "data": {"task_status": 3}},
+            claim_error=wb.DoubaoError("豆包工作：领取结果确认中，请稍后重试", 200),
         )
         result = self.claim(client, sleep_fn=sleeps.append)
         self.assertEqual("confirming", result["status"])
@@ -279,7 +328,7 @@ class DoubaoWorkTests(unittest.TestCase):
     def test_rerun_with_pending_only_queries_same_task_and_never_reclaims(self):
         first = FakeClient(
             [detail(), detail(checked=False, state=2)],
-            {"code": 0, "data": {"task_status": 3}},
+            claim_error=wb.DoubaoError("豆包工作：领取结果确认中，请稍后重试", 200),
         )
         self.claim(first)
         self.assertEqual(1, first.claim_calls)
@@ -380,17 +429,16 @@ class DoubaoWorkTests(unittest.TestCase):
                     self.claim(client)
                 self.assertIsNone(self.ledger().pending)
 
-    def test_reward_rejected_clears_pending(self):
+    def test_landing_success_false_does_not_override_checked_in(self):
         client = FakeClient(
-            [detail()],
-            {"code": 0, "data": {"success": False}},
+            [detail(), detail(checked=True, state=3)],
+            {"code": 0, "data": {"success": False, "checked_in": True}},
         )
-        with self.assertRaises(wb.DoubaoError) as raised:
-            self.claim(client)
-        self.assertEqual("reward_rejected", raised.exception.code)
+        result = self.claim(client)
+        self.assertEqual("claimed", result["status"])
         self.assertIsNone(self.ledger().pending)
 
-    def test_success_false_wins_over_invalid_biz_error(self):
+    def test_invalid_landing_biz_error_keeps_pending(self):
         client = FakeClient(
             [detail()],
             {
@@ -398,14 +446,13 @@ class DoubaoWorkTests(unittest.TestCase):
                 "data": {
                     "success": False,
                     "biz_error": "invalid",
-                    "task_status": 3,
+                    "checked_in": True,
                 },
             },
         )
-        with self.assertRaises(wb.DoubaoError) as raised:
+        with self.assertRaises(wb.DoubaoError):
             self.claim(client)
-        self.assertEqual("reward_rejected", raised.exception.code)
-        self.assertIsNone(self.ledger().pending)
+        self.assertIsNotNone(self.ledger().pending)
 
     def test_reward_rejected_code_wins_over_confirmation_text(self):
         client = FakeClient(
@@ -438,8 +485,8 @@ class DoubaoWorkTests(unittest.TestCase):
                     self.claim(client)
                 self.assertIsNotNone(self.ledger().pending)
 
-    def test_receipt_biz_error_explicit_success_codes_are_accepted(self):
-        for code in (0, 4, 6, "0", "4", "6"):
+    def test_receipt_biz_error_only_zero_is_accepted(self):
+        for code in (0, "0"):
             with self.subTest(code=code):
                 self.reset_state()
                 client = FakeClient(
@@ -448,7 +495,7 @@ class DoubaoWorkTests(unittest.TestCase):
                         "code": 0,
                         "data": {
                             "biz_error": {"code": code},
-                            "task_status": 3,
+                            "checked_in": True,
                         },
                     },
                 )
@@ -456,8 +503,8 @@ class DoubaoWorkTests(unittest.TestCase):
                 self.assertEqual("claimed", result["status"])
                 self.assertIsNone(self.ledger().pending)
 
-    def test_receipt_biz_error_decimal_codes_are_rejected(self):
-        for code in (0.9, 4.9, 6.9, "0.9", "4.9", "6.9", "4.0"):
+    def test_receipt_biz_error_nonzero_or_fractional_codes_are_rejected(self):
+        for code in (4, 6, "4", "6", 0.9, 4.9, 6.9, "0.9", "4.9", "6.9", "4.0"):
             with self.subTest(code=code):
                 self.reset_state()
                 client = FakeClient(
@@ -466,7 +513,7 @@ class DoubaoWorkTests(unittest.TestCase):
                         "code": 0,
                         "data": {
                             "biz_error": {"code": code},
-                            "task_status": 3,
+                            "checked_in": True,
                         },
                     },
                 )
@@ -504,12 +551,58 @@ class DoubaoWorkTests(unittest.TestCase):
         monotonic_values = iter((100.0, 118.1))
         client = FakeClient(
             [detail()],
-            {"code": 0, "data": {"task_status": 3}},
+            claim_error=wb.DoubaoError("豆包工作：领取结果确认中，请稍后重试", 200),
         )
         with self.assertRaises(wb.DoubaoError) as raised:
             self.claim(client, monotonic_fn=lambda: next(monotonic_values))
         self.assertEqual(504, raised.exception.status)
         self.assertIsNotNone(self.ledger().pending)
+
+    def test_official_system_error_rechecks_then_clears_pending(self):
+        client = FakeClient(
+            [detail(), detail()],
+            claim_error=wb.DoubaoError(
+                "豆包工作：official system error",
+                200,
+                wb.OFFICIAL_SYSTEM_ERROR_CODE,
+            ),
+        )
+        with self.assertRaises(wb.DoubaoError) as raised:
+            self.claim(client)
+        self.assertEqual(wb.OFFICIAL_SYSTEM_ERROR_CODE, raised.exception.code)
+        self.assertIsNone(self.ledger().pending)
+        self.assertEqual(1, client.claim_calls)
+
+    def test_nested_official_system_error_rechecks_then_clears_pending(self):
+        client = FakeClient(
+            [detail(), detail()],
+            {
+                "code": 0,
+                "data": {
+                    "biz_error": {
+                        "code": wb.OFFICIAL_SYSTEM_ERROR_CODE,
+                        "message": "official system error",
+                    },
+                },
+            },
+        )
+        with self.assertRaises(wb.DoubaoError) as raised:
+            self.claim(client)
+        self.assertEqual(wb.OFFICIAL_SYSTEM_ERROR_CODE, raised.exception.code)
+        self.assertIsNone(self.ledger().pending)
+        self.assertEqual(1, client.claim_calls)
+
+    def test_landing_receipt_points_are_persisted_before_reconcile(self):
+        client = FakeClient(
+            [detail(), detail(checked=False, state=2)],
+            {"code": 0, "data": {"checked_in": True, "reward_amount": 17}},
+        )
+        result = self.claim(client)
+        self.assertEqual("confirming", result["status"])
+        pending = self.ledger().pending
+        self.assertIsNotNone(pending)
+        self.assertEqual(17, pending.points)
+        self.assertEqual("landing_checkin", pending.endpoint)
 
     def test_retry_window_and_round_limit_match_provider(self):
         attempt = wb.PendingAttempt(

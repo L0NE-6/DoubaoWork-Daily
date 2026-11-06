@@ -1,5 +1,14 @@
 # 更新日志
 
+## v1.2.0（2026-11-07）
+
+- 每日签到接口迁移到 `POST /alice/ug/campaign/landing/checkin`，请求体改为 `{"scene": campaign_group_code}`；旧任务领奖接口不再用于每日签到。
+- 即时回执只接受 `data.biz_error` 为空或业务码 `0`，并要求 `data.checked_in=true`；`task_status=3` 或单独 `success:false` 不再覆盖官方签到标记。
+- 写入后继续回查同一活动与任务，只有详情 `daily_checkin.checked_in_today=true` 才返回已领取。
+- `710010702` 按官方系统错误处理：先回查官方状态，仍未签到才清除待确认记录并返回错误。
+- 待确认记录增加稳定端点语义与错误字段；旧记录缺少端点时按旧任务领奖接口回查，明确未签到后才迁移到 landing 签到。
+- 回执积分立即持久化；新增 landing 回执、旧状态迁移、嵌套系统错误与积分落盘测试，全套 `35` 项测试通过。
+
 ## v1.1.0（2026-11-05）
 
 - 对齐 Agent2Providers `v3.4.2`：领取前原子写入 pending，同日重跑只回查原 `group/item`，不会重复提交领取。

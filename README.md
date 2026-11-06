@@ -47,7 +47,7 @@
 | **输出** | 今日已领、可领取、活动未投放、条件未满足、奖励额度和连续天数。 |
 | **部署** | 青龙面板、GitHub Actions、Windows / Linux 本地运行。 |
 | **依赖** | Python 3 + `requests`；仓库 Actions 使用 Python 3.11。 |
-| **成功判据** | 领取后以官方详情 `checked_in_today=true` 为唯一完成依据；`task_status=3` 不覆盖明确的 false。 |
+| **成功判据** | landing 回执要求 `checked_in=true`，最终仍以官方详情 `checked_in_today=true` 为唯一完成依据。 |
 
 **核心能力**
 
@@ -71,9 +71,9 @@ Cookie
   → 找唯一 daily_checkin
   → 固定锁内重读 pending 台账
   → 无 pending 时原子占用并保存
-  → POST /alice/ug/campaign/item/reward/claim/
+  → POST /alice/ug/campaign/landing/checkin  {"scene": 活动组}
   → 0 / 2 / 4 秒回查同一 group/item
-  → 仅 checked_in_today=true 才算确认
+  → 回执 checked_in=true 后继续回查，仅 checked_in_today=true 才算确认
 ```
 
 脚本只处理 `https://www.doubao.com` 国内站。每日任务必须唯一；活动结构异常或出现多个候选时，脚本会报告无法确认，而不是猜测领取对象。确认预算为 18 秒，未确认任务按 10 分钟间隔、30 分钟窗口和最多 4 轮安排后续只读回查。
@@ -261,7 +261,7 @@ pip3 install requests
 
 ## 📦 版本与发布
 
-- 当前候选版本：`v1.1.0`（待发布；正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
+- 当前候选版本：`v1.2.0`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
 
 ## ☕ 支持与反馈
 
