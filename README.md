@@ -55,6 +55,7 @@
 - 自动选择 `pc_incentive_task_mvp_v3` 的 v3 详情接口或普通活动列表接口。
 - 只在详情中存在唯一 `daily_checkin` 任务时继续领取。
 - 已领取、活动未投放和任务未满足条件均按中性状态处理。
+- 真正提交 checkin 前补发 `landing/report` 操作事件；report 为 best-effort，不参与签到成功判定。
 - 领取后强制回查，不把单个业务 `code=0` 当作最终成功。
 - pending 台账在写请求前原子落盘，同日重跑只回查同一 `group/item`，不重复提交领取。
 - 台账使用进程线程锁和 Windows `msvcrt` / Linux `flock` 固定锁文件，跨线程、跨进程串行。
@@ -71,6 +72,7 @@ Cookie
   → 找唯一 daily_checkin
   → 固定锁内重读 pending 台账
   → 无 pending 时原子占用并保存
+  → POST /alice/ug/campaign/landing/report  {"event_type":"user_operate","biz_event_name":"check_in"}
   → POST /alice/ug/campaign/landing/checkin  {"scene": 活动组}
   → 0 / 2 / 4 秒回查同一 group/item
   → 回执 checked_in=true 后继续回查，仅 checked_in_today=true 才算确认
@@ -261,7 +263,7 @@ pip3 install requests
 
 ## 📦 版本与发布
 
-- 当前候选版本：`v1.2.0`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
+- 当前候选版本：`v1.3.0`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
 
 ## ☕ 支持与反馈
 

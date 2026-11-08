@@ -22,6 +22,7 @@
 - v3 detail または通常の campaign list エンドポイントを選択します。
 - 詳細内に `daily_checkin` がちょうど 1 件ある場合だけ処理します。
 - 受領済み、未配信、条件未達は中立状態として扱います。
+- 実際の checkin 直前に best-effort の `landing/report` 操作イベントを送信します。
 - 受領後に詳細を再取得し、`checked_in_today=true` のみを完了条件にします。`task_status=3` は明示的な false を上書きしません。
 - 複数アカウント、`--query`、`--only`、PushPlus、Bark、WeCom 通知に対応します。
 

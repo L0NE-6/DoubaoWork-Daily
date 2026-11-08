@@ -71,14 +71,19 @@ DEFAULT_CLIENT_VERSION = "2.33.5"
 RUNTIME_VERSION = "3.42.2"
 V3_GROUP = "pc_incentive_task_mvp_v3"
 LEGACY_CLAIM_PATH = "/alice/ug/campaign/item/reward/claim/"
+REPORT_PATH = "/alice/ug/campaign/landing/report"
 CLAIM_PATH = "/alice/ug/campaign/landing/checkin"
+REPORT_BODY = {
+    "event_type": "user_operate",
+    "biz_event_name": "check_in",
+}
 CLAIM_ENDPOINT_ITEM_REWARD = "item_reward"
 CLAIM_ENDPOINT_LANDING_CHECKIN = "landing_checkin"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.getenv("DOUBAOWORK_STATE_FILE", "").strip() or os.path.join(
     SCRIPT_DIR, "doubaowork_state.json"
 )
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 STATE_VERSION = 1
 CONFIRM_BUDGET_SECONDS = 18.0
 CONFIRM_POLL_DELAYS = (0.0, 2.0, 4.0)
@@ -781,6 +786,15 @@ def _campaign_detail(client: DoubaoClient, group: str, timeout: float = 30.0) ->
     return value
 
 
+def _report_checkin_event(client: DoubaoClient, timeout: float = 30.0) -> None:
+    """Best-effort landing report before an actual check-in submission."""
+    try:
+        client.post(REPORT_PATH, dict(REPORT_BODY), timeout=timeout)
+    except Exception as error:
+        message = str(error)[:80] or type(error).__name__
+        log("豆包工作 checkin report 失败，继续领取：%s" % message)
+
+
 def _validate_receipt(payload: Dict[str, Any]) -> bool:
     data = payload.get("data")
     if not isinstance(data, dict):
@@ -1064,6 +1078,7 @@ def _claim_daily_locked(
     )
     store.save(entry)
     _ensure_ledger_day(entry, now_ms_fn)
+    _report_checkin_event(client)
 
     try:
         response = client.post(CLAIM_PATH, {"scene": task["group"]})

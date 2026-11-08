@@ -109,20 +109,30 @@ class FakeClient:
         claim_payload=None,
         claim_error=None,
         claim_hook=None,
+        report_payload=None,
+        report_error=None,
     ):
         self.details = list(details)
         self.claim_payload = claim_payload or {}
         self.claim_error = claim_error
         self.claim_hook = claim_hook
+        self.report_payload = report_payload or {"code": 0, "data": {}}
+        self.report_error = report_error
         self.account = account()
         self.calls = []
         self.claim_calls = 0
+        self.report_calls = 0
 
     def post(self, path, body, timeout=30.0):
         self.calls.append((path, body, timeout))
         if path == "/alice/user/launch":
             return {"code": 0, "data": {"ug_campaign_info": {"campaign_group_code": wb.V3_GROUP}}}
-        if path.startswith("/alice/ug/campaign/") and path != wb.CLAIM_PATH:
+        if path == wb.REPORT_PATH:
+            self.report_calls += 1
+            if self.report_error:
+                raise self.report_error
+            return self.report_payload
+        if path in ("/alice/ug/campaign/v3/detail/", "/alice/ug/campaign/list/"):
             if len(self.details) > 1:
                 return self.details.pop(0)
             return self.details[0]
@@ -256,6 +266,14 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual("landing_checkin", observed["pending"]["endpoint"])
         claim_call = next(call for call in client.calls if call[0] == wb.CLAIM_PATH)
         self.assertEqual({"scene": wb.V3_GROUP}, claim_call[1])
+        report_call = next(call for call in client.calls if call[0] == wb.REPORT_PATH)
+        self.assertEqual(
+            {"event_type": "user_operate", "biz_event_name": "check_in"},
+            report_call[1],
+        )
+        paths = [call[0] for call in client.calls]
+        self.assertLess(paths.index(wb.REPORT_PATH), paths.index(wb.CLAIM_PATH))
+        self.assertEqual(1, client.report_calls)
         self.assertIsNone(self.ledger().pending)
 
     def test_detail_task_status_does_not_override_checked_in_state(self):
@@ -338,11 +356,34 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual("done", result["status"])
         self.assertTrue(result["completed"])
         self.assertEqual(0, second.claim_calls)
+        self.assertEqual(0, second.report_calls)
         self.assertFalse(any(path == "/alice/user/launch" for path, _, _ in second.calls))
-        detail_calls = [call for call in second.calls if call[0].startswith("/alice/ug/campaign/")]
+        detail_calls = [
+            call for call in second.calls
+            if call[0] == "/alice/ug/campaign/v3/detail/"
+        ]
         self.assertEqual(1, len(detail_calls))
         self.assertEqual({"campaign_group_code": wb.V3_GROUP}, detail_calls[0][1])
         self.assertIsNone(self.ledger().pending)
+
+    def test_report_failure_does_not_block_or_fake_checkin_result(self):
+        failures = (
+            requests.Timeout("report timeout"),
+            wb.DoubaoError("report business failure", 200, 123),
+        )
+        for report_error in failures:
+            with self.subTest(report_error=type(report_error).__name__):
+                self.reset_state()
+                client = FakeClient(
+                    [detail(), detail(checked=True, state=3)],
+                    {"code": 0, "data": {"checked_in": True}},
+                    report_error=report_error,
+                )
+                result = self.claim(client)
+                self.assertEqual("claimed", result["status"])
+                self.assertEqual(1, client.report_calls)
+                self.assertEqual(1, client.claim_calls)
+                self.assertIsNone(self.ledger().pending)
 
     def test_confirming_business_message_also_queries_instead_of_reposting(self):
         client = FakeClient(
@@ -757,6 +798,7 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual("available", result["status"])
         self.assertFalse(result["completed"])
         self.assertEqual(0, client.claim_calls)
+        self.assertEqual(0, client.report_calls)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.3.0（2026-11-09）
+
+- 在真实提交 `landing/checkin` 前补发 `landing/report` 操作事件：`event_type=user_operate`、`biz_event_name=check_in`。
+- report 只在 pending 已原子落盘且本轮确实需要提交 claim 时发送；已有 pending 的只读回查、`--query` 和已签到状态都不发送 report。
+- report 采用 best-effort：网络失败、HTTP 错误或业务错误只记录日志，不阻断 claim，也不参与签到成功判定。
+- 最终成功仍要求 claim 回执 `checked_in=true`，并继续以官方详情 `checked_in_today=true` 为唯一完成依据。
+- 新增 report 顺序、业务失败不阻断、pending 重跑不重复 report 等回归；全套 `36` 项测试通过。
+
 ## v1.2.0（2026-11-07）
 
 - 每日签到接口迁移到 `POST /alice/ug/campaign/landing/checkin`，请求体改为 `{"scene": campaign_group_code}`；旧任务领奖接口不再用于每日签到。
