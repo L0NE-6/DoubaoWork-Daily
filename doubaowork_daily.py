@@ -83,7 +83,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.getenv("DOUBAOWORK_STATE_FILE", "").strip() or os.path.join(
     SCRIPT_DIR, "doubaowork_state.json"
 )
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 STATE_VERSION = 1
 CONFIRM_BUDGET_SECONDS = 18.0
 CONFIRM_POLL_DELAYS = (0.0, 2.0, 4.0)
@@ -918,6 +918,22 @@ def _reconcile_pending(
     attempt = entry.pending
     if attempt is None:
         raise DoubaoError("豆包工作缺少待确认任务，未提交领取", 500)
+    if attempt.upstream_failure == OFFICIAL_SYSTEM_ERROR_CODE:
+        _ensure_ledger_day(entry, now_ms_fn)
+        payload = _campaign_detail(client, attempt.group)
+        task = _pending_task(payload, attempt)
+        if task["checked"] is True:
+            result = _completed_result(task, False, attempt.points)
+            _clear_pending(store, entry)
+            return result
+        raise DoubaoError(
+            "710010702：当前 landing/checkin 需要官方活动页 SDK 生成的 "
+            "biz_params/AgwCommonParam，纯 HTTP 无法可靠完成。"
+            "请在官方客户端点击“立即签到”，然后再次运行脚本；"
+            "pending 已保留，后续只会回读状态，不会重复提交。",
+            502,
+            OFFICIAL_SYSTEM_ERROR_CODE,
+        )
     deadline = monotonic_fn() + CONFIRM_BUDGET_SECONDS
     queried = False
     for delay in CONFIRM_POLL_DELAYS:
@@ -945,14 +961,6 @@ def _reconcile_pending(
             return result
         if attempt.retry_at(now_ms_fn()) is None:
             break
-    if attempt.upstream_failure == OFFICIAL_SYSTEM_ERROR_CODE:
-        _clear_pending(store, entry)
-        raise DoubaoError(
-            "豆包官方签到服务返回系统错误（710010702），回查确认今日仍未签到；"
-            "请稍后重试或在官方客户端查看",
-            502,
-            OFFICIAL_SYSTEM_ERROR_CODE,
-        )
     retry_at = attempt.retry_at(now_ms_fn())
     message = (
         "豆包工作领取结果待确认，稍后只查询结果，不会重复提交领取"

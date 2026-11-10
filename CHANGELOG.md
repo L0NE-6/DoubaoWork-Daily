@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.3.1（2026-11-10）
+
+- `710010702` 重新归类为“需要官方活动页 SDK”：当前 landing/checkin 需要页面运行时生成的 `biz_params` 与 `AgwCommonParam`，纯 HTTP 不自行伪造。
+- 收到该错误后不再执行 0/2/4 秒重复详情探测，也不清除 pending；只做一次状态回读后明确提示。
+- pending 保留后，后续运行只回读状态，不会重复发送无效 claim；用户在官方客户端点击“立即签到”后再次运行即可确认并清除 pending。
+- `landing/report` 继续作为 best-effort 操作事件，但不再暗示它能替代 SDK 风控上下文。
+- 新增 SDK 错误保留 pending、官方点击后无重复 claim 的回归；全套 `37` 项测试通过。
+
 ## v1.3.0（2026-11-09）
 
 - 在真实提交 `landing/checkin` 前补发 `landing/report` 操作事件：`event_type=user_operate`、`biz_event_name=check_in`。

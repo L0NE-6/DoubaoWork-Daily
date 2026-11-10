@@ -23,6 +23,7 @@
 - 只有詳情中存在唯一 `daily_checkin` 任務時才繼續。
 - 已領取、活動未投放、尚未滿足條件都按中性狀態處理。
 - 真正提交 checkin 前先發送 best-effort `landing/report` 操作事件。
+- `710010702` 表示需要官方頁面 SDK 上下文；請在官方客戶端點擊簽到，再重跑腳本只做狀態確認。
 - 領取後重新讀取詳情，只接受 `checked_in_today=true`；`task_status=3` 不會覆蓋明確的 false。
 - 支援多帳號、`--query`、`--only` 與 PushPlus、Bark、企業微信通知。
 

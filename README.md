@@ -80,6 +80,9 @@ Cookie
 
 脚本只处理 `https://www.doubao.com` 国内站。每日任务必须唯一；活动结构异常或出现多个候选时，脚本会报告无法确认，而不是猜测领取对象。确认预算为 18 秒，未确认任务按 10 分钟间隔、30 分钟窗口和最多 4 轮安排后续只读回查。
 
+> [!IMPORTANT]
+> 若 `landing/checkin` 返回 `710010702`，当前页面通常要求 SDK 运行时生成 `biz_params` 与 `AgwCommonParam`。脚本不会伪造这两个风控字段；请在官方客户端点击“立即签到”，然后再次运行脚本。pending 会保留，后续只回读状态，不重复提交。
+
 ## 🚀 快速开始
 
 **1. 安装依赖**
@@ -263,7 +266,7 @@ pip3 install requests
 
 ## 📦 版本与发布
 
-- 当前候选版本：`v1.3.0`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
+- 当前候选版本：`v1.3.1`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
 
 ## ☕ 支持与反馈
 

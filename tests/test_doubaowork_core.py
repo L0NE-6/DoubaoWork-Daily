@@ -599,7 +599,7 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual(504, raised.exception.status)
         self.assertIsNotNone(self.ledger().pending)
 
-    def test_official_system_error_rechecks_then_clears_pending(self):
+    def test_official_system_error_keeps_pending_and_requires_official_page(self):
         client = FakeClient(
             [detail(), detail()],
             claim_error=wb.DoubaoError(
@@ -611,10 +611,11 @@ class DoubaoWorkTests(unittest.TestCase):
         with self.assertRaises(wb.DoubaoError) as raised:
             self.claim(client)
         self.assertEqual(wb.OFFICIAL_SYSTEM_ERROR_CODE, raised.exception.code)
-        self.assertIsNone(self.ledger().pending)
+        self.assertIn("官方活动页 SDK", str(raised.exception))
+        self.assertIsNotNone(self.ledger().pending)
         self.assertEqual(1, client.claim_calls)
 
-    def test_nested_official_system_error_rechecks_then_clears_pending(self):
+    def test_nested_official_system_error_keeps_pending(self):
         client = FakeClient(
             [detail(), detail()],
             {
@@ -630,8 +631,29 @@ class DoubaoWorkTests(unittest.TestCase):
         with self.assertRaises(wb.DoubaoError) as raised:
             self.claim(client)
         self.assertEqual(wb.OFFICIAL_SYSTEM_ERROR_CODE, raised.exception.code)
-        self.assertIsNone(self.ledger().pending)
+        self.assertIsNotNone(self.ledger().pending)
         self.assertEqual(1, client.claim_calls)
+
+    def test_official_page_click_then_rerun_reconciles_without_reclaim(self):
+        first = FakeClient(
+            [detail()],
+            claim_error=wb.DoubaoError(
+                "official system error",
+                200,
+                wb.OFFICIAL_SYSTEM_ERROR_CODE,
+            ),
+        )
+        with self.assertRaises(wb.DoubaoError):
+            self.claim(first)
+        self.assertEqual(1, first.claim_calls)
+        self.assertIsNotNone(self.ledger().pending)
+
+        second = FakeClient([detail(checked=True, state=3)])
+        result = self.claim(second)
+        self.assertEqual("done", result["status"])
+        self.assertEqual(0, second.claim_calls)
+        self.assertFalse(any(path == wb.REPORT_PATH for path, _, _ in second.calls))
+        self.assertIsNone(self.ledger().pending)
 
     def test_landing_receipt_points_are_persisted_before_reconcile(self):
         client = FakeClient(

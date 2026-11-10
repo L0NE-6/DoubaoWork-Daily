@@ -23,6 +23,7 @@
 - Continua apenas quando existe exatamente uma tarefa `daily_checkin`.
 - Trata recompensa já recebida, campanha não publicada e condição não atendida como estados neutros.
 - Envia um evento best-effort `landing/report` imediatamente antes do check-in real.
+- `710010702` indica que o contexto do SDK da página oficial é necessário; faça o check-in no cliente oficial e execute novamente.
 - Relê os detalhes após o resgate e aceita somente `checked_in_today=true`; `task_status=3` nunca substitui um false explícito.
 - Suporta várias contas, modo somente consulta, seleção de uma conta e notificações PushPlus, Bark e WeCom.
 
