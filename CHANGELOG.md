@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.3.3（2026-11-14）
+
+- `--query` 增加显式活动组详情探测：当 `/alice/user/launch` 返回 `code=0` 但缺少 `campaign_group_code`、同时配置了 `DOUBAOWORK_CAMPAIGN_GROUP` 时，继续只读请求活动详情确认 `checked_in_today`。
+- GitHub Actions 的 query/claim 步骤默认传入 `DOUBAOWORK_CAMPAIGN_GROUP=pc_incentive_task_mvp_v3`；仓库变量可覆盖。
+- claim 的写保护不变：launch 缺组时不会因为显式组而提交 `/landing/checkin`，必须先由 query 证据确认活动可见。
+- 诊断新增 `launch_shape`、`launch_group_missing`、`detail_probe` 以及 `has_device_id` / `has_web_id` / `has_fp` 布尔值，不输出凭据或设备原值。
+- 新增 launch 缺组 + 显式详情成功、无显式组保持 inactive、claim 不探测/不写请求的回归；全套 `45` 项测试通过。
+
 ## v1.3.2（2026-11-13）
 
 - GitHub Actions 默认执行只读 `--query`；只有 `workflow_dispatch` 显式选择 `mode=claim` 才运行领取，schedule 即使启用也固定只读。

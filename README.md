@@ -6,7 +6,7 @@
 
 **豆包工作每日签到单文件脚本：发现活动、领取奖励，并通过活动详情回查确认签到状态。**
 
-> 当前版本：**v1.3.2**（2026-11-13） · 最新更新：Actions 默认只读、显式 claim，移除合成 report 并补脱敏诊断
+> 当前版本：**v1.3.3**（2026-11-14） · 最新更新：Actions query 增加显式活动组详情探测与 launch 结构诊断
 
 [简体中文](README.md) | [English](docs/README.en.md) | [繁體中文](docs/README.zh-Hant.md) | [日本語](docs/README.ja.md) | [한국어](docs/README.ko.md) | [Português (BR)](docs/README.pt-BR.md)
 
@@ -162,6 +162,7 @@ pip3 install requests
 | `DOUBAOWORK_WEB_ID` | 否 | Web ID |
 | `DOUBAOWORK_FINGERPRINT` | 否 | 指纹；缺省读取 Cookie 中的 `s_v_web_id` / `fp` |
 | `DOUBAOWORK_PROXY` | 否 | HTTP(S) / SOCKS5 代理 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | 否 | 仅 query 诊断；launch 缺活动组时用显式组读详情，Actions 默认 `pc_incentive_task_mvp_v3` |
 | `PUSHPLUS_TOKEN` | 否 | PushPlus 推送令牌 |
 | `BARK_URL` | 否 | Bark 推送地址 |
 | `WECOM_WEBHOOK` | 否 | 企业微信机器人 webhook |
@@ -213,6 +214,7 @@ pip3 install requests
 | `DOUBAOWORK_USER_AGENT` | 可选 User-Agent |
 | `DOUBAOWORK_CLIENT_VERSION` | 可选客户端版本，默认 `2.33.5` |
 | `DOUBAOWORK_PROXY` | HTTP(S) / SOCKS5 代理 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | 可选活动组；仅用于 query 的 launch 缺组详情探测，不会让 claim 绕过 launch |
 | `DOUBAOWORK_NO_NOTIFY` | 设为 `1` 时关闭通知 |
 | `DOUBAOWORK_BASE_URL` | 高级；默认 `https://www.doubao.com` |
 | `DOUBAOWORK_STATE_FILE` | pending 台账路径；默认脚本目录下 `doubaowork_state.json` |
@@ -276,7 +278,7 @@ pip3 install requests
 
 ## 📦 版本与发布
 
-- 当前候选版本：`v1.3.2`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
+- 当前候选版本：`v1.3.3`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
 
 ## ☕ 支持与反馈
 

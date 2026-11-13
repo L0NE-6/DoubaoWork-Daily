@@ -86,6 +86,7 @@ pip3 install requests
 | `DOUBAOWORK_WEB_ID` | 否 | Web ID |
 | `DOUBAOWORK_FINGERPRINT` | 否 | 指紋 |
 | `DOUBAOWORK_PROXY` | 否 | 代理 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | 否 | launch 缺少 `campaign_group_code` 時，query 專用的活動組詳情探測；claim 仍要求 launch 條件 |
 | `PUSHPLUS_TOKEN` / `BARK_URL` / `WECOM_WEBHOOK` | 否 | 通知 |
 
 若要啟用排程，取消兩行註解。`15 1 * * *` 使用 UTC，對應北京時間 09:15。
@@ -103,6 +104,7 @@ pip3 install requests
 | `DOUBAOWORK_USER_AGENT` | 可選 User-Agent |
 | `DOUBAOWORK_CLIENT_VERSION` | 可選版本，預設 `2.33.5` |
 | `DOUBAOWORK_PROXY` | HTTP(S) / SOCKS5 代理 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | query 的唯讀詳情探測用；不會繞過 claim 的 launch 前置 |
 | `DOUBAOWORK_NO_NOTIFY` | `1` 關閉通知 |
 
 ## 📊 成功判據

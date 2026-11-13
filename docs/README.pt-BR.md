@@ -86,6 +86,7 @@ O workflow está em [../.github/workflows/daily.yml](../.github/workflows/daily.
 | `DOUBAOWORK_WEB_ID` | Opcional | Web ID |
 | `DOUBAOWORK_FINGERPRINT` | Opcional | Fingerprint |
 | `DOUBAOWORK_PROXY` | Opcional | Proxy |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | Opcional | Grupo de fallback somente para query quando o launch omite `campaign_group_code`; o claim continua exigindo o contexto do launch |
 | `PUSHPLUS_TOKEN` / `BARK_URL` / `WECOM_WEBHOOK` | Opcional | Notificações |
 
 Para ativar o agendamento, remova os comentários. `15 1 * * *` usa UTC e corresponde a 09:15 em Pequim.
@@ -103,6 +104,7 @@ Para ativar o agendamento, remova os comentários. `15 1 * * *` usa UTC e corres
 | `DOUBAOWORK_USER_AGENT` | User-Agent opcional |
 | `DOUBAOWORK_CLIENT_VERSION` | Versão do cliente; padrão `2.33.5` |
 | `DOUBAOWORK_PROXY` | Proxy HTTP(S) / SOCKS5 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | Consulta de detalhe somente leitura no query; nunca ignora o gate do claim |
 | `DOUBAOWORK_NO_NOTIFY` | `1` desativa notificações |
 
 ## 📊 Critério de sucesso

@@ -86,6 +86,7 @@ pip3 install requests
 | `DOUBAOWORK_WEB_ID` | 任意 | Web ID |
 | `DOUBAOWORK_FINGERPRINT` | 任意 | Fingerprint |
 | `DOUBAOWORK_PROXY` | 任意 | プロキシ |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | 任意 | launch が `campaign_group_code` を返さない場合の query 専用フォールバック。claim は launch 条件を必須のまま |
 | `PUSHPLUS_TOKEN` / `BARK_URL` / `WECOM_WEBHOOK` | 任意 | 通知 |
 
 定時実行を有効にする場合はコメントを外します。`15 1 * * *` は UTC で、北京時間 09:15 に相当します。
@@ -103,6 +104,7 @@ pip3 install requests
 | `DOUBAOWORK_USER_AGENT` | 任意の User-Agent |
 | `DOUBAOWORK_CLIENT_VERSION` | 任意のクライアント版。既定 `2.33.5` |
 | `DOUBAOWORK_PROXY` | HTTP(S) / SOCKS5 プロキシ |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | query の読み取り専用 detail 確認用。claim の launch 条件は回避しない |
 | `DOUBAOWORK_NO_NOTIFY` | `1` で通知を無効化 |
 
 ## 📊 成功条件

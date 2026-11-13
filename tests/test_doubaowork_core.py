@@ -376,6 +376,11 @@ class DoubaoWorkTests(unittest.TestCase):
         )
         self.assertIn("run: python doubaowork_daily.py --query", workflow)
         self.assertIn("run: python doubaowork_daily.py\n", workflow)
+        self.assertIn(
+            "DOUBAOWORK_CAMPAIGN_GROUP: ${{ vars.DOUBAOWORK_CAMPAIGN_GROUP "
+            "|| 'pc_incentive_task_mvp_v3' }}",
+            workflow,
+        )
 
     def test_collect_tasks_finds_unique_daily_task_and_generic_body(self):
         rows = wb.collect_tasks(detail(), wb.V3_GROUP)
@@ -984,6 +989,86 @@ class DoubaoWorkTests(unittest.TestCase):
 
         result = self.claim(NoActivity())
         self.assertEqual("inactive", result["status"])
+
+    def test_query_explicit_group_probes_detail_when_launch_has_no_group(self):
+        class EmptyLaunchDetailClient:
+            account = account()
+
+            def __init__(self):
+                self.calls = []
+                self.last_diagnostic = {}
+
+            def set_checked_in_today(self, checked):
+                self.last_diagnostic["checked_in_today"] = checked
+
+            def post(self, path, body, timeout=30.0):
+                self.calls.append((path, body, timeout))
+                if path == "/alice/user/launch":
+                    return {"code": 0, "data": {}}
+                if path == "/alice/ug/campaign/v3/detail/":
+                    return detail(checked=True, state=3)
+                raise AssertionError("unexpected path %s" % path)
+
+        client = EmptyLaunchDetailClient()
+        with mock.patch.dict(os.environ, {"DOUBAOWORK_CAMPAIGN_GROUP": wb.V3_GROUP}, clear=False):
+            result = wb.query_daily(client)
+        self.assertEqual("done", result["status"])
+        self.assertTrue(result["checked_in_today"])
+        self.assertTrue(result["launch_group_missing"])
+        self.assertEqual("found", result["detail_probe"]["daily_task"])
+        self.assertEqual(
+            ["/alice/user/launch", "/alice/ug/campaign/v3/detail/"],
+            [path for path, _, _ in client.calls],
+        )
+
+        diagnostic = wb.build_diagnostic(
+            client.account,
+            "query",
+            client,
+            "none",
+            result=result,
+        )
+        self.assertEqual("missing", diagnostic["launch_shape"]["campaign_group_code"])
+        self.assertTrue(diagnostic["launch_group_missing"])
+        self.assertFalse(diagnostic["has_device_id"])
+        self.assertFalse(diagnostic["has_web_id"])
+        self.assertFalse(diagnostic["has_fp"])
+
+    def test_query_without_explicit_group_keeps_launch_inactive(self):
+        class EmptyLaunchClient:
+            account = account()
+            last_diagnostic = {}
+
+            def __init__(self):
+                self.calls = []
+
+            def post(self, path, body, timeout=30.0):
+                self.calls.append((path, body, timeout))
+                return {"code": 0, "data": {}}
+
+        client = EmptyLaunchClient()
+        with mock.patch.dict(os.environ, {"DOUBAOWORK_CAMPAIGN_GROUP": ""}, clear=False):
+            result = wb.query_daily(client)
+        self.assertEqual("inactive", result["status"])
+        self.assertEqual(["/alice/user/launch"], [path for path, _, _ in client.calls])
+
+    def test_claim_does_not_probe_explicit_group_when_launch_is_empty(self):
+        class EmptyLaunchClient:
+            account = account()
+            last_diagnostic = {}
+
+            def __init__(self):
+                self.calls = []
+
+            def post(self, path, body, timeout=30.0):
+                self.calls.append((path, body, timeout))
+                return {"code": 0, "data": {}}
+
+        client = EmptyLaunchClient()
+        with mock.patch.dict(os.environ, {"DOUBAOWORK_CAMPAIGN_GROUP": wb.V3_GROUP}, clear=False):
+            result = self.claim(client)
+        self.assertEqual("inactive", result["status"])
+        self.assertEqual(["/alice/user/launch"], [path for path, _, _ in client.calls])
 
     def test_query_does_not_claim_and_task_status_three_is_not_done(self):
         client = FakeClient([detail(checked=False, state=3)])

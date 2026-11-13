@@ -79,7 +79,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.getenv("DOUBAOWORK_STATE_FILE", "").strip() or os.path.join(
     SCRIPT_DIR, "doubaowork_state.json"
 )
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 STATE_VERSION = 1
 CONFIRM_BUDGET_SECONDS = 18.0
 CONFIRM_POLL_DELAYS = (0.0, 2.0, 4.0)
@@ -257,7 +257,7 @@ def build_diagnostic(
     elif isinstance(client_last.get("checked_in_today"), bool):
         checked_in_today = client_last["checked_in_today"]
 
-    return {
+    payload = {
         "action": action,
         "account": redact_sensitive_text(account.name if account else "", secrets),
         "request_path": last.get("request_path"),
@@ -269,7 +269,14 @@ def build_diagnostic(
         "pending": pending,
         "session_cookie_shape": _session_cookie_shape(account),
         "device_context": _device_context_shape(account),
+        "has_device_id": bool(account and account.device_id),
+        "has_web_id": bool(account and account.web_id),
+        "has_fp": bool(account and account.fingerprint),
     }
+    for key in ("launch_shape", "launch_group_missing", "detail_probe"):
+        if isinstance(result, dict) and key in result:
+            payload[key] = result[key]
+    return payload
 
 
 def log_diagnostic(
@@ -979,6 +986,21 @@ def _activity_group(payload: Dict[str, Any]) -> str:
     return first_text(info, ("campaign_group_code",))
 
 
+def _configured_campaign_group() -> str:
+    return os.getenv("DOUBAOWORK_CAMPAIGN_GROUP", "").strip()
+
+
+def _launch_shape(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    info = data.get("ug_campaign_info") if isinstance(data, dict) else None
+    group = first_text(info, ("campaign_group_code",)) if isinstance(info, dict) else ""
+    return {
+        "data_is_object": isinstance(data, dict),
+        "has_ug_campaign_info": isinstance(info, dict),
+        "campaign_group_code": "present" if group else "missing",
+    }
+
+
 def _detail_path(group: str) -> str:
     return "/alice/ug/campaign/v3/detail/" if group == V3_GROUP else "/alice/ug/campaign/list/"
 
@@ -1366,12 +1388,68 @@ def _claim_daily_locked(
 
 def query_daily(client: DoubaoClient) -> Dict[str, Any]:
     launch = client.post("/alice/user/launch", {})
+    launch_shape = _launch_shape(launch)
     group = _activity_group(launch)
     if not group:
-        return {
+        configured_group = _configured_campaign_group()
+        base = {
             "status": "inactive",
             "message": "当前没有豆包工作签到活动",
             "checked_in_today": None,
+            "launch_shape": launch_shape,
+            "launch_group_missing": True,
+        }
+        if not configured_group:
+            return base
+        try:
+            detail = _campaign_detail(client, configured_group)
+        except Exception as error:
+            base.update(
+                {
+                    "message": "launch 缺少活动组，显式活动组详情探测失败",
+                    "detail_probe": {
+                        "group": configured_group,
+                        "ok": False,
+                        "message": str(error)[:160],
+                    },
+                }
+            )
+            return base
+        task, error = _daily_task(detail, configured_group)
+        if error:
+            base.update(
+                {
+                    "message": error,
+                    "detail_probe": {
+                        "group": configured_group,
+                        "ok": True,
+                        "daily_task": "missing",
+                    },
+                }
+            )
+            return base
+        checked = task["checked"] is True
+        return {
+            "status": "done" if checked else "available",
+            "message": (
+                "今日已领取（launch 缺组，已通过详情确认）"
+                if checked
+                else "今日尚未确认领取（launch 缺组，已通过详情确认）"
+            ),
+            "points": task["points"],
+            "streak": task["streak"],
+            "title": task["title"],
+            "completed": checked,
+            "query_only": True,
+            "retry_at": None,
+            "checked_in_today": checked,
+            "launch_shape": launch_shape,
+            "launch_group_missing": True,
+            "detail_probe": {
+                "group": configured_group,
+                "ok": True,
+                "daily_task": "found",
+            },
         }
     detail = _campaign_detail(client, group)
     task, error = _daily_task(detail, group)
@@ -1392,6 +1470,8 @@ def query_daily(client: DoubaoClient) -> Dict[str, Any]:
         "query_only": True,
         "retry_at": None,
         "checked_in_today": checked,
+        "launch_shape": launch_shape,
+        "launch_group_missing": False,
     }
 
 

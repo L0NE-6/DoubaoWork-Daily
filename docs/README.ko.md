@@ -86,6 +86,7 @@ pip3 install requests
 | `DOUBAOWORK_WEB_ID` | 선택 | Web ID |
 | `DOUBAOWORK_FINGERPRINT` | 선택 | Fingerprint |
 | `DOUBAOWORK_PROXY` | 선택 | 프록시 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | 선택 | launch가 `campaign_group_code`를 생략할 때 query 전용 상세 조회 그룹. claim은 launch 조건을 계속 요구 |
 | `PUSHPLUS_TOKEN` / `BARK_URL` / `WECOM_WEBHOOK` | 선택 | 알림 |
 
 정기 실행을 사용하려면 주석을 해제하세요. `15 1 * * *`는 UTC 기준이며 베이징 시간 09:15입니다.
@@ -103,6 +104,7 @@ pip3 install requests
 | `DOUBAOWORK_USER_AGENT` | 선택 User-Agent |
 | `DOUBAOWORK_CLIENT_VERSION` | 선택 클라이언트 버전, 기본 `2.33.5` |
 | `DOUBAOWORK_PROXY` | HTTP(S) / SOCKS5 프록시 |
+| `DOUBAOWORK_CAMPAIGN_GROUP` | query의 읽기 전용 상세 조회용. claim의 launch 게이트를 우회하지 않음 |
 | `DOUBAOWORK_NO_NOTIFY` | `1`이면 알림 비활성화 |
 
 ## 📊 성공 기준
