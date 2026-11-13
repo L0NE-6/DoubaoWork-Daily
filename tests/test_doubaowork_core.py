@@ -11,6 +11,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 from urllib.parse import urlparse
 
 import requests
@@ -109,29 +110,23 @@ class FakeClient:
         claim_payload=None,
         claim_error=None,
         claim_hook=None,
-        report_payload=None,
-        report_error=None,
     ):
         self.details = list(details)
         self.claim_payload = claim_payload or {}
         self.claim_error = claim_error
         self.claim_hook = claim_hook
-        self.report_payload = report_payload or {"code": 0, "data": {}}
-        self.report_error = report_error
         self.account = account()
         self.calls = []
         self.claim_calls = 0
-        self.report_calls = 0
+        self.last_diagnostic = {}
+
+    def set_checked_in_today(self, checked):
+        self.last_diagnostic["checked_in_today"] = checked
 
     def post(self, path, body, timeout=30.0):
         self.calls.append((path, body, timeout))
         if path == "/alice/user/launch":
             return {"code": 0, "data": {"ug_campaign_info": {"campaign_group_code": wb.V3_GROUP}}}
-        if path == wb.REPORT_PATH:
-            self.report_calls += 1
-            if self.report_error:
-                raise self.report_error
-            return self.report_payload
         if path in ("/alice/ug/campaign/v3/detail/", "/alice/ug/campaign/list/"):
             if len(self.details) > 1:
                 return self.details.pop(0)
@@ -209,6 +204,179 @@ class DoubaoWorkTests(unittest.TestCase):
         with self.assertRaises(wb.DoubaoAuthError):
             wb.parse_cookie("foo=bar")
 
+    def test_equal_session_cookie_values_are_valid_and_forwarded_unchanged(self):
+        raw = "sessionid=same-session-value; sessionid_ss=same-session-value"
+        pairs = wb.parse_cookie(raw)
+        client_account = wb.Account("账号", wb.cookie_header(pairs), pairs)
+        self.assertEqual("same-session-value", pairs["sessionid"])
+        self.assertEqual(pairs["sessionid"], pairs["sessionid_ss"])
+        self.assertEqual(raw, wb.cookie_header(pairs))
+        self.assertEqual("both_equal", wb._session_cookie_shape(client_account))
+        self.assertEqual(
+            wb.account_ledger_key(client_account),
+            wb.account_ledger_key(
+                wb.Account(
+                    "另一备注",
+                    "sessionid=same-session-value; sessionid_ss=different-value",
+                    {
+                        "sessionid": "same-session-value",
+                        "sessionid_ss": "different-value",
+                    },
+                )
+            ),
+        )
+
+    def test_diagnostic_redacts_cookie_token_and_phone_values(self):
+        client_account = wb.Account(
+            "13800138000",
+            (
+                "sessionid=session-cookie-secret; "
+                "sessionid_ss=session-cookie-secret; token=header-token-secret"
+            ),
+            {
+                "sessionid": "session-cookie-secret",
+                "sessionid_ss": "session-cookie-secret",
+                "token": "header-token-secret",
+            },
+            device_id="device-secret-value",
+        )
+        client = SimpleNamespace(
+            last_diagnostic={
+                "request_path": wb.CLAIM_PATH,
+                "http_status": 403,
+                "business_code": 710012001,
+                "message": (
+                    "Cookie sessionid=session-cookie-secret token=header-token-secret "
+                    "手机号 13800138000"
+                ),
+                "checked_in_today": False,
+            }
+        )
+        error = wb.DoubaoError(
+            "denied sessionid=session-cookie-secret token=header-token-secret 13800138000",
+            403,
+            710012001,
+        )
+        diagnostic = wb.build_diagnostic(
+            client_account,
+            "claim",
+            client,
+            "pending_landing_checkin",
+            error=error,
+        )
+        rendered = json.dumps(diagnostic, ensure_ascii=False)
+        self.assertEqual(wb.CLAIM_PATH, diagnostic["request_path"])
+        self.assertEqual(403, diagnostic["http_status"])
+        self.assertEqual(710012001, diagnostic["business_code"])
+        self.assertFalse(diagnostic["checked_in_today"])
+        self.assertEqual("pending_landing_checkin", diagnostic["pending"])
+        self.assertEqual("both_equal", diagnostic["session_cookie_shape"])
+        self.assertEqual("device_id", diagnostic["device_context"])
+        for secret in (
+            "session-cookie-secret",
+            "header-token-secret",
+            "device-secret-value",
+            "13800138000",
+        ):
+            self.assertNotIn(secret, rendered)
+        self.assertIn("[REDACTED_PHONE]", rendered)
+
+    def test_account_file_diagnostic_redacts_device_fingerprint_and_proxy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "accounts.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    [
+                        {
+                            "name": "账号",
+                            "cookie": "sessionid=account-file-cookie",
+                            "device_id": "raw-device-value",
+                            "web_id": "raw-web-value",
+                            "fingerprint": "raw-fingerprint-value",
+                            "proxy": "http://usr:p%40ss@127.0.0.1:8080",
+                        }
+                    ],
+                    handle,
+                    ensure_ascii=False,
+                )
+            environment = {
+                "DOUBAOWORK_ACCOUNTS_FILE": path,
+                "DOUBAOWORK_COOKIES": "",
+                "DOUBAOWORK_COOKIE": "",
+            }
+            with mock.patch.dict(os.environ, environment, clear=False):
+                accounts = wb.load_accounts()
+
+        self.assertEqual(1, len(accounts))
+        client = SimpleNamespace(last_diagnostic={"request_path": wb.CLAIM_PATH})
+        error = wb.DoubaoError(
+            "failed raw-device-value raw-web-value raw-fingerprint-value "
+            "usr p%40ss p@ss fingerprint=raw-fingerprint-value",
+            502,
+        )
+        diagnostic = wb.build_diagnostic(
+            accounts[0],
+            "query",
+            client,
+            "none",
+            error=error,
+        )
+        rendered = json.dumps(diagnostic, ensure_ascii=False)
+        for secret in (
+            "account-file-cookie",
+            "raw-device-value",
+            "raw-web-value",
+            "raw-fingerprint-value",
+            "usr",
+            "p%40ss",
+            "p@ss",
+        ):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, rendered)
+
+    def test_ledger_pending_state_exposes_sdk_requirement_without_values(self):
+        store = wb.CheckinLedgerStore(
+            self.state_path,
+            "account",
+            now_ms_fn=lambda: NOW_MS,
+        )
+        store.save(
+            wb.LedgerEntry(
+                wb.beijing_date_key(NOW_MS),
+                wb.PendingAttempt(
+                    group=wb.V3_GROUP,
+                    item="daily-checkin",
+                    submitted_at=NOW_MS,
+                    rounds=1,
+                    points=None,
+                    endpoint=wb.CLAIM_ENDPOINT_LANDING_CHECKIN,
+                    upstream_failure=wb.OFFICIAL_SYSTEM_ERROR_CODE,
+                ),
+            )
+        )
+        self.assertEqual(
+            "pending_sdk_required",
+            wb.ledger_pending_state(
+                "account",
+                self.state_path,
+                now_ms_fn=lambda: NOW_MS,
+            ),
+        )
+
+    def test_actions_workflow_defaults_to_query_and_requires_explicit_claim(self):
+        workflow = (
+            Path(wb.__file__).resolve().parent / ".github" / "workflows" / "daily.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("default: query", workflow)
+        self.assertIn(
+            "github.event_name != 'workflow_dispatch' || inputs.mode == 'query'", workflow
+        )
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.mode == 'claim'", workflow
+        )
+        self.assertIn("run: python doubaowork_daily.py --query", workflow)
+        self.assertIn("run: python doubaowork_daily.py\n", workflow)
+
     def test_collect_tasks_finds_unique_daily_task_and_generic_body(self):
         rows = wb.collect_tasks(detail(), wb.V3_GROUP)
         self.assertEqual(1, len(rows))
@@ -266,14 +434,8 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual("landing_checkin", observed["pending"]["endpoint"])
         claim_call = next(call for call in client.calls if call[0] == wb.CLAIM_PATH)
         self.assertEqual({"scene": wb.V3_GROUP}, claim_call[1])
-        report_call = next(call for call in client.calls if call[0] == wb.REPORT_PATH)
-        self.assertEqual(
-            {"event_type": "user_operate", "biz_event_name": "check_in"},
-            report_call[1],
-        )
         paths = [call[0] for call in client.calls]
-        self.assertLess(paths.index(wb.REPORT_PATH), paths.index(wb.CLAIM_PATH))
-        self.assertEqual(1, client.report_calls)
+        self.assertNotIn("/alice/ug/campaign/landing/report", paths)
         self.assertIsNone(self.ledger().pending)
 
     def test_detail_task_status_does_not_override_checked_in_state(self):
@@ -356,34 +518,25 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual("done", result["status"])
         self.assertTrue(result["completed"])
         self.assertEqual(0, second.claim_calls)
-        self.assertEqual(0, second.report_calls)
         self.assertFalse(any(path == "/alice/user/launch" for path, _, _ in second.calls))
-        detail_calls = [
-            call for call in second.calls
-            if call[0] == "/alice/ug/campaign/v3/detail/"
-        ]
+        detail_calls = [call for call in second.calls if call[0] == "/alice/ug/campaign/v3/detail/"]
         self.assertEqual(1, len(detail_calls))
         self.assertEqual({"campaign_group_code": wb.V3_GROUP}, detail_calls[0][1])
         self.assertIsNone(self.ledger().pending)
 
-    def test_report_failure_does_not_block_or_fake_checkin_result(self):
-        failures = (
-            requests.Timeout("report timeout"),
-            wb.DoubaoError("report business failure", 200, 123),
+    def test_claim_has_no_synthetic_report_write(self):
+        client = FakeClient(
+            [detail(), detail(checked=True, state=3)],
+            {"code": 0, "data": {"checked_in": True}},
         )
-        for report_error in failures:
-            with self.subTest(report_error=type(report_error).__name__):
-                self.reset_state()
-                client = FakeClient(
-                    [detail(), detail(checked=True, state=3)],
-                    {"code": 0, "data": {"checked_in": True}},
-                    report_error=report_error,
-                )
-                result = self.claim(client)
-                self.assertEqual("claimed", result["status"])
-                self.assertEqual(1, client.report_calls)
-                self.assertEqual(1, client.claim_calls)
-                self.assertIsNone(self.ledger().pending)
+        result = self.claim(client)
+        self.assertEqual("claimed", result["status"])
+        self.assertEqual(1, client.claim_calls)
+        self.assertNotIn(
+            "/alice/ug/campaign/landing/report",
+            [path for path, _body, _timeout in client.calls],
+        )
+        self.assertIsNone(self.ledger().pending)
 
     def test_confirming_business_message_also_queries_instead_of_reposting(self):
         client = FakeClient(
@@ -600,18 +753,37 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertIsNotNone(self.ledger().pending)
 
     def test_official_system_error_keeps_pending_and_requires_official_page(self):
+        claim_diagnostic = {
+            "request_path": wb.CLAIM_PATH,
+            "http_status": 200,
+            "business_code": wb.OFFICIAL_SYSTEM_ERROR_CODE,
+            "message": "official system error",
+            "checked_in_today": None,
+        }
         client = FakeClient(
             [detail(), detail()],
             claim_error=wb.DoubaoError(
                 "豆包工作：official system error",
                 200,
                 wb.OFFICIAL_SYSTEM_ERROR_CODE,
+                diagnostic=claim_diagnostic,
             ),
         )
         with self.assertRaises(wb.DoubaoError) as raised:
             self.claim(client)
         self.assertEqual(wb.OFFICIAL_SYSTEM_ERROR_CODE, raised.exception.code)
         self.assertIn("官方活动页 SDK", str(raised.exception))
+        diagnostic = wb.build_diagnostic(
+            client.account,
+            "claim",
+            client,
+            "pending_sdk_required",
+            error=raised.exception,
+        )
+        self.assertEqual(wb.CLAIM_PATH, diagnostic["request_path"])
+        self.assertEqual(200, diagnostic["http_status"])
+        self.assertEqual(wb.OFFICIAL_SYSTEM_ERROR_CODE, diagnostic["business_code"])
+        self.assertFalse(diagnostic["checked_in_today"])
         self.assertIsNotNone(self.ledger().pending)
         self.assertEqual(1, client.claim_calls)
 
@@ -652,7 +824,6 @@ class DoubaoWorkTests(unittest.TestCase):
         result = self.claim(second)
         self.assertEqual("done", result["status"])
         self.assertEqual(0, second.claim_calls)
-        self.assertFalse(any(path == wb.REPORT_PATH for path, _, _ in second.calls))
         self.assertIsNone(self.ledger().pending)
 
     def test_landing_receipt_points_are_persisted_before_reconcile(self):
@@ -820,7 +991,6 @@ class DoubaoWorkTests(unittest.TestCase):
         self.assertEqual("available", result["status"])
         self.assertFalse(result["completed"])
         self.assertEqual(0, client.claim_calls)
-        self.assertEqual(0, client.report_calls)
 
 
 if __name__ == "__main__":

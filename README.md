@@ -55,10 +55,11 @@
 - 自动选择 `pc_incentive_task_mvp_v3` 的 v3 详情接口或普通活动列表接口。
 - 只在详情中存在唯一 `daily_checkin` 任务时继续领取。
 - 已领取、活动未投放和任务未满足条件均按中性状态处理。
-- 真正提交 checkin 前补发 `landing/report` 操作事件；report 为 best-effort，不参与签到成功判定。
 - 领取后强制回查，不把单个业务 `code=0` 当作最终成功。
 - pending 台账在写请求前原子落盘，同日重跑只回查同一 `group/item`，不重复提交领取。
 - 台账使用进程线程锁和 Windows `msvcrt` / Linux `flock` 固定锁文件，跨线程、跨进程串行。
+- GitHub Actions 默认只执行 `--query`；只有手动选择 `mode=claim` 才提交领取。
+- 每个账号输出一行脱敏诊断：请求路径、HTTP 状态、业务码、消息、`checked_in_today` 和 pending 状态；不输出 Cookie、Token、手机号或设备值。
 - 支持多账号、`--query`、`--only` 和 PushPlus / Bark / 企业微信通知。
 
 > 协议语义对齐 Agent2Providers `v3.4.2` 的 `doubaowork/checkin`、`checkin_state` 与 `rewards`。本脚本按同一条 Cookie + campaign + reward 协议做 clean-room 实现；首次使用建议先执行 `--query`。
@@ -72,7 +73,6 @@ Cookie
   → 找唯一 daily_checkin
   → 固定锁内重读 pending 台账
   → 无 pending 时原子占用并保存
-  → POST /alice/ug/campaign/landing/report  {"event_type":"user_operate","biz_event_name":"check_in"}
   → POST /alice/ug/campaign/landing/checkin  {"scene": 活动组}
   → 0 / 2 / 4 秒回查同一 group/item
   → 回执 checked_in=true 后继续回查，仅 checked_in_today=true 才算确认
@@ -148,7 +148,7 @@ pip3 install requests
 
 ## ☁️ GitHub Actions
 
-工作流位于 [`.github/workflows/daily.yml`](.github/workflows/daily.yml)。**默认只有手动触发**；定时段目前被注释。
+工作流位于 [`.github/workflows/daily.yml`](.github/workflows/daily.yml)。**默认只有手动触发，且默认使用只读 `query` 模式**；定时段目前被注释。
 
 在仓库 `Settings → Secrets and variables → Actions` 中配置：
 
@@ -164,11 +164,13 @@ pip3 install requests
 | `BARK_URL` | 否 | Bark 推送地址 |
 | `WECOM_WEBHOOK` | 否 | 企业微信机器人 webhook |
 
-需要定时运行时，取消 workflow 中 schedule 两行的注释。示例 `15 1 * * *` 使用 UTC，对应北京时间 09:15。
+手动执行时选择 `mode=query` 只读取活动详情；只有明确选择 `mode=claim` 才会运行不带 `--query` 的领取命令。以后取消 workflow 中 schedule 两行注释时，定时事件也固定走 `--query`，不会自动提交领取。
+
+同一 Cookie 不要同时在本地和其他云端工作流执行 `claim`。需要切换执行端时，先在一个端点完成状态确认，另一个端点只运行 `query`。仓库内用 `concurrency` 串行同仓运行，但 Git 仓库的并发组无法协调本机进程，因此跨设备互斥仍靠这条操作约束。
 
 工作流没有默认透传 `DOUBAOWORK_ACCOUNTS_FILE`、`DOUBAOWORK_USER_AGENT`、`DOUBAOWORK_CLIENT_VERSION` 和 `DOUBAOWORK_NO_NOTIFY`；这些变量可在本地或青龙中使用，或自行在 workflow 中显式添加映射。
 
-工作流使用 `actions/cache/restore` / `actions/cache/save` 保留最小化 pending 台账，并用 `concurrency` 串行同仓运行。Actions 级串行不替代脚本内的固定锁文件。
+工作流使用 `actions/cache/restore` / `actions/cache/save` 保留最小化 pending 台账；只有显式 `claim` 才保存台账。Actions 级串行不替代脚本内的固定锁文件。
 
 ## 🔧 环境变量
 
@@ -256,17 +258,23 @@ pip3 install requests
 仓库默认保留 `workflow_dispatch`，而 schedule 两行是注释状态。需要定时运行时手动取消注释，并确认 fork 仓库已启用 Actions。
 </details>
 
+<details>
+<summary><b>`sessionid` 与 `sessionid_ss` 相同正常吗？</b></summary>
+
+脚本不要求两者不同：至少有一个非空值即可；同时存在时会原样发送，台账身份优先使用 `sessionid`，缺失时回退到 `sessionid_ss`。相等值不会改变领取分支，因此不能单凭这一点判定脚本异常。平台是否接受当前登录态仍以请求返回的 HTTP 状态、业务码和官方详情为准。
+</details>
+
 ## 🔒 隐私与安全
 
 - Cookie 等同于登录态，必须只放在环境变量、GitHub Secrets 或本地临时 shell 中；
 - 不把 Cookie 粘贴到公开 Issue、README、Release 或聊天；
-- 日志只显示脱敏 Cookie 摘要，不输出完整登录态；
+- 诊断日志只输出 Cookie 形态、设备上下文类型、HTTP 状态、业务码、接口消息、`checked_in_today` 和 pending 状态，不输出 Cookie、Token、手机号或设备值；
 - 本仓库不写入 Cookie、设备标识或完整账号数据；仅写最小化 pending 台账；
 - 如果 Cookie 曾公开，请立即退出对应会话或重新登录使旧 Cookie 失效。
 
 ## 📦 版本与发布
 
-- 当前候选版本：`v1.3.1`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
+- 当前候选版本：`v1.3.2`（正式发布状态以 [Releases](https://github.com/L0NE-6/DoubaoWork-Daily/releases) 的 tag 为准）。
 
 ## ☕ 支持与反馈
 

@@ -50,6 +50,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
 
 import requests
 import urllib3
@@ -71,19 +72,14 @@ DEFAULT_CLIENT_VERSION = "2.33.5"
 RUNTIME_VERSION = "3.42.2"
 V3_GROUP = "pc_incentive_task_mvp_v3"
 LEGACY_CLAIM_PATH = "/alice/ug/campaign/item/reward/claim/"
-REPORT_PATH = "/alice/ug/campaign/landing/report"
 CLAIM_PATH = "/alice/ug/campaign/landing/checkin"
-REPORT_BODY = {
-    "event_type": "user_operate",
-    "biz_event_name": "check_in",
-}
 CLAIM_ENDPOINT_ITEM_REWARD = "item_reward"
 CLAIM_ENDPOINT_LANDING_CHECKIN = "landing_checkin"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.getenv("DOUBAOWORK_STATE_FILE", "").strip() or os.path.join(
     SCRIPT_DIR, "doubaowork_state.json"
 )
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 STATE_VERSION = 1
 CONFIRM_BUDGET_SECONDS = 18.0
 CONFIRM_POLL_DELAYS = (0.0, 2.0, 4.0)
@@ -101,10 +97,17 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class DoubaoError(RuntimeError):
-    def __init__(self, message: str, status: int = 0, code: Any = None):
+    def __init__(
+        self,
+        message: str,
+        status: int = 0,
+        code: Any = None,
+        diagnostic: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.status = int(status or 0)
         self.code = code
+        self.diagnostic = dict(diagnostic or {})
 
 
 class DoubaoAuthError(DoubaoError):
@@ -124,6 +127,161 @@ def mask_cookie(value: str) -> str:
     if len(value) <= 18:
         return "***"
     return value[:10] + "..." + value[-6:]
+
+
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"(?i)\b(sessionid(?:_ss)?|sid_guard|uid_tt(?:_ss)?|passport_csrf_token|"
+    r"cookie(?:header)?|authorization|access_token|refresh_token|id_token|token|"
+    r"device_id|web_id|s_v_web_id|fp)\s*[:=]\s*[\"']?([^\"'\s;,}&]+)"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_JWT_TOKEN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+_PHONE_NUMBER = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
+
+
+def _configured_secret_values() -> List[str]:
+    names = (
+        "PUSHPLUS_TOKEN",
+        "BARK_URL",
+        "WECOM_WEBHOOK",
+        "DOUBAOWORK_DEVICE_ID",
+        "DOUBAOWORK_WEB_ID",
+        "DOUBAOWORK_FINGERPRINT",
+        "DOUBAOWORK_PROXY",
+    )
+    return [value for value in (os.getenv(name, "").strip() for name in names) if value]
+
+
+def redact_sensitive_text(value: Any, secrets: Iterable[str] = ()) -> str:
+    """Remove credential-shaped values before a log or notification leaves the process."""
+    text = str(value or "")
+    explicit_values = {str(item) for item in secrets if str(item)}
+    for secret in sorted(explicit_values, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    configured_values = {str(item) for item in _configured_secret_values() if len(str(item)) >= 6}
+    for secret in sorted(configured_values, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    text = _SENSITIVE_ASSIGNMENT.sub(
+        lambda match: match.group(1) + "=[REDACTED]",
+        text,
+    )
+    text = _BEARER_TOKEN.sub("Bearer [REDACTED]", text)
+    text = _JWT_TOKEN.sub("[REDACTED_TOKEN]", text)
+    text = _PHONE_NUMBER.sub("[REDACTED_PHONE]", text)
+    return text[:500]
+
+
+def account_secret_values(account: Optional["Account"]) -> List[str]:
+    if account is None:
+        return []
+    values = [account.cookie, *account.cookie_pairs.values()]
+    for value in (
+        account.device_id,
+        account.web_id,
+        account.fingerprint,
+        account.proxy,
+        account.user_agent,
+        account.client_version,
+    ):
+        if value:
+            values.append(value)
+    if account.proxy:
+        try:
+            parsed = urlsplit(
+                account.proxy if "://" in account.proxy else "http://" + account.proxy
+            )
+            for value in (parsed.username, parsed.password):
+                if value:
+                    values.extend((value, unquote(value)))
+        except ValueError:
+            pass
+    return [value for value in values if value]
+
+
+def _session_cookie_shape(account: Optional["Account"]) -> str:
+    if account is None:
+        return "unknown"
+    session_id = account.cookie_pairs.get("sessionid", "")
+    session_id_ss = account.cookie_pairs.get("sessionid_ss", "")
+    if session_id and session_id_ss:
+        return "both_equal" if session_id == session_id_ss else "both_distinct"
+    if session_id:
+        return "sessionid_only"
+    if session_id_ss:
+        return "sessionid_ss_only"
+    return "missing"
+
+
+def _device_context_shape(account: Optional["Account"]) -> str:
+    if account is None:
+        return "unknown"
+    if account.device_id:
+        return "device_id"
+    if account.fingerprint:
+        return "fingerprint"
+    return "none"
+
+
+def build_diagnostic(
+    account: Optional["Account"],
+    action: str,
+    client: Any,
+    pending: str,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[BaseException] = None,
+) -> Dict[str, Any]:
+    client_last = getattr(client, "last_diagnostic", {}) if client is not None else {}
+    client_last = client_last if isinstance(client_last, dict) else {}
+    error_last = getattr(error, "diagnostic", {}) if error is not None else {}
+    error_last = error_last if isinstance(error_last, dict) and error_last else {}
+    last = error_last or client_last
+    secrets = account_secret_values(account)
+    if error is not None:
+        message = str(error)
+        business_code = getattr(error, "code", None)
+    elif isinstance(result, dict):
+        message = str(result.get("message", ""))
+        business_code = result.get("business_code")
+    else:
+        message = str(last.get("message", ""))
+        business_code = last.get("business_code")
+    if business_code is None:
+        business_code = last.get("business_code")
+
+    checked_in_today: Optional[bool] = None
+    if isinstance(result, dict) and "checked_in_today" in result:
+        checked_value = result.get("checked_in_today")
+        checked_in_today = checked_value if isinstance(checked_value, bool) else None
+    elif isinstance(last.get("checked_in_today"), bool):
+        checked_in_today = last["checked_in_today"]
+    elif isinstance(client_last.get("checked_in_today"), bool):
+        checked_in_today = client_last["checked_in_today"]
+
+    return {
+        "action": action,
+        "account": redact_sensitive_text(account.name if account else "", secrets),
+        "request_path": last.get("request_path"),
+        "http_status": last.get("http_status"),
+        "business_code": business_code,
+        "message": redact_sensitive_text(message, secrets),
+        "upstream_message": redact_sensitive_text(last.get("message", ""), secrets),
+        "checked_in_today": checked_in_today,
+        "pending": pending,
+        "session_cookie_shape": _session_cookie_shape(account),
+        "device_context": _device_context_shape(account),
+    }
+
+
+def log_diagnostic(
+    account: Optional["Account"],
+    action: str,
+    client: Any,
+    pending: str,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[BaseException] = None,
+) -> None:
+    payload = build_diagnostic(account, action, client, pending, result, error)
+    log("   🩺 诊断: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 def first_text(value: Any, keys: Iterable[str]) -> str:
@@ -495,6 +653,24 @@ class CheckinLedgerStore:
         _atomic_write_json(self.path, self.document)
 
 
+def ledger_pending_state(
+    account_key: str,
+    state_path: Optional[str] = None,
+    now_ms_fn: Callable[[], int] = now_ms,
+) -> str:
+    try:
+        entry = CheckinLedgerStore(state_path or STATE_FILE, account_key, now_ms_fn).load()
+    except (DoubaoError, OSError, TypeError, ValueError):
+        return "unreadable"
+    if entry.pending is None:
+        return "none"
+    if entry.pending.upstream_failure == OFFICIAL_SYSTEM_ERROR_CODE:
+        return "pending_sdk_required"
+    if entry.pending.endpoint == CLAIM_ENDPOINT_LANDING_CHECKIN:
+        return "pending_landing_checkin"
+    return "pending_item_reward"
+
+
 def _account_from_cookie(name: str, cookie: str) -> Account:
     pairs = parse_cookie(cookie)
     return Account(
@@ -519,7 +695,8 @@ def load_accounts() -> List[Account]:
     file_path = os.getenv("DOUBAOWORK_ACCOUNTS_FILE", "").strip()
     if file_path and os.path.exists(file_path):
         try:
-            data = json.load(open(file_path, "r", encoding="utf-8"))
+            with open(file_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
             rows = data if isinstance(data, list) else data.get("accounts", [])
             for index, row in enumerate(rows, 1):
                 if not isinstance(row, dict):
@@ -562,7 +739,9 @@ def load_accounts() -> List[Account]:
                         )
                 accounts.append(account)
         except Exception as error:
-            log("⚠️ 读取 DOUBAOWORK_ACCOUNTS_FILE 失败: %s" % str(error)[:100])
+            log(
+                "⚠️ 读取 DOUBAOWORK_ACCOUNTS_FILE 失败: %s" % redact_sensitive_text(str(error))[:100]
+            )
 
     multi = os.getenv("DOUBAOWORK_COOKIES", "").strip()
     if multi:
@@ -577,14 +756,15 @@ def load_accounts() -> List[Account]:
             try:
                 accounts.append(_account_from_cookie(name.strip(), cookie.strip()))
             except DoubaoError as error:
-                log("⚠️ %s Cookie 无效: %s" % (name.strip() or "账号%d" % index, error))
+                safe_name = redact_sensitive_text(name.strip() or "账号%d" % index)
+                log("⚠️ %s Cookie 无效: %s" % (safe_name, redact_sensitive_text(error)))
 
     single = os.getenv("DOUBAOWORK_COOKIE", "").strip()
     if single:
         try:
             accounts.append(_account_from_cookie("单账号", single))
         except DoubaoError as error:
-            log("⚠️ DOUBAOWORK_COOKIE 无效: %s" % error)
+            log("⚠️ DOUBAOWORK_COOKIE 无效: %s" % redact_sensitive_text(error))
     return accounts
 
 
@@ -595,6 +775,7 @@ class DoubaoClient:
         self.account = account
         self.base_url = base_url.rstrip("/")
         self.session = session or requests.Session()
+        self.last_diagnostic: Dict[str, Any] = {}
         self.session.trust_env = False
         if account.proxy:
             self.session.proxies.update({"http": account.proxy, "https": account.proxy})
@@ -640,43 +821,73 @@ class DoubaoClient:
             "Accept": "application/json, text/plain, */*",
         }
 
+    def _attach_diagnostic(self, error: DoubaoError) -> DoubaoError:
+        error.diagnostic = dict(self.last_diagnostic)
+        return error
+
+    def set_checked_in_today(self, checked: Optional[bool]) -> None:
+        self.last_diagnostic["checked_in_today"] = checked
+
     def post(self, path: str, body: Any, timeout: float = 30.0) -> Dict[str, Any]:
-        response = self.session.post(
-            self.base_url + path,
-            params=self.query_params(),
-            headers=self._headers(),
-            json=body,
-            timeout=timeout,
-            verify=False,
-        )
+        self.last_diagnostic = {
+            "request_path": path,
+            "http_status": None,
+            "business_code": None,
+            "message": "",
+            "checked_in_today": None,
+        }
+        try:
+            response = self.session.post(
+                self.base_url + path,
+                params=self.query_params(),
+                headers=self._headers(),
+                json=body,
+                timeout=timeout,
+                verify=False,
+            )
+        except Exception as error:
+            self.last_diagnostic["message"] = str(error)
+            raise
+
+        self.last_diagnostic["http_status"] = response.status_code
         try:
             payload = response.json()
         except Exception:
-            raise DoubaoError(
-                "豆包工作未返回有效 JSON（HTTP %s）" % response.status_code,
-                response.status_code,
-            )
+            message = "豆包工作未返回有效 JSON（HTTP %s）" % response.status_code
+            self.last_diagnostic["message"] = message
+            raise self._attach_diagnostic(DoubaoError(message, response.status_code))
         if not isinstance(payload, dict):
-            raise DoubaoError("豆包工作返回的 JSON 不是对象", response.status_code)
+            message = "豆包工作返回的 JSON 不是对象"
+            self.last_diagnostic["message"] = message
+            raise self._attach_diagnostic(DoubaoError(message, response.status_code))
         code = integer(payload.get("code"))
+        detail = payload.get("error_detail") or payload.get("error") or payload
+        message = first_text(
+            detail,
+            ("message", "msg", "error_msg", "error_message", "detail"),
+        )
+        message = message or first_text(payload, ("msg", "message")) or ""
+        self.last_diagnostic["business_code"] = code
+        self.last_diagnostic["message"] = message
         ok_code = code == 0 or (code == 200 and path.startswith("/alice/ug/"))
         if not 200 <= response.status_code < 300 or not ok_code:
-            detail = payload.get("error_detail") or payload.get("error") or payload
-            message = first_text(detail, ("message", "msg", "error_msg", "error_message", "detail"))
-            message = message or first_text(payload, ("msg", "message")) or "豆包工作接口失败"
+            message = message or "豆包工作接口失败"
+            self.last_diagnostic["message"] = message
             if (
                 response.status_code == 401
                 or code == 710012001
                 or "not logged in" in message.lower()
             ):
-                raise DoubaoAuthError(
-                    "豆包工作登录态已失效，请重新登录", response.status_code, code
+                raise self._attach_diagnostic(
+                    DoubaoAuthError("豆包工作登录态已失效，请重新登录", response.status_code, code)
                 )
             if response.status_code == 429 or code == 710022004:
-                raise DoubaoRateLimitError(
-                    "豆包工作触发限流，请稍后重试", response.status_code, code
+                raise self._attach_diagnostic(
+                    DoubaoRateLimitError("豆包工作触发限流，请稍后重试", response.status_code, code)
                 )
-            raise DoubaoError("豆包工作：%s" % message, response.status_code, code)
+            raise self._attach_diagnostic(
+                DoubaoError("豆包工作：%s" % message, response.status_code, code)
+            )
         return payload
 
 
@@ -783,16 +994,9 @@ def _campaign_detail(client: DoubaoClient, group: str, timeout: float = 30.0) ->
         campaign_code = first_text(data, ("campaign_code",))
         if group == V3_GROUP and campaign_code and campaign_code != group:
             raise DoubaoError("豆包工作返回了不匹配的活动组", 502)
+    daily_tasks = [row for row in collect_tasks(value, group) if row["daily"]]
+    client.set_checked_in_today(daily_tasks[0]["checked"] if len(daily_tasks) == 1 else None)
     return value
-
-
-def _report_checkin_event(client: DoubaoClient, timeout: float = 30.0) -> None:
-    """Best-effort landing report before an actual check-in submission."""
-    try:
-        client.post(REPORT_PATH, dict(REPORT_BODY), timeout=timeout)
-    except Exception as error:
-        message = str(error)[:80] or type(error).__name__
-        log("豆包工作 checkin report 失败，继续领取：%s" % message)
 
 
 def _validate_receipt(payload: Dict[str, Any]) -> bool:
@@ -894,6 +1098,7 @@ def _completed_result(
             "completed": True,
             "query_only": False,
             "retry_at": None,
+            "checked_in_today": True,
         }
     return {
         "status": "done",
@@ -903,6 +1108,7 @@ def _completed_result(
         "completed": True,
         "query_only": False,
         "retry_at": None,
+        "checked_in_today": True,
     }
 
 
@@ -914,6 +1120,7 @@ def _reconcile_pending(
     now_ms_fn: Callable[[], int],
     monotonic_fn: Callable[[], float],
     sleep_fn: Callable[[float], None],
+    upstream_diagnostic: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     attempt = entry.pending
     if attempt is None:
@@ -926,7 +1133,7 @@ def _reconcile_pending(
             result = _completed_result(task, False, attempt.points)
             _clear_pending(store, entry)
             return result
-        raise DoubaoError(
+        failure = DoubaoError(
             "710010702：当前 landing/checkin 需要官方活动页 SDK 生成的 "
             "biz_params/AgwCommonParam，纯 HTTP 无法可靠完成。"
             "请在官方客户端点击“立即签到”，然后再次运行脚本；"
@@ -934,6 +1141,12 @@ def _reconcile_pending(
             502,
             OFFICIAL_SYSTEM_ERROR_CODE,
         )
+        failure.diagnostic = dict(upstream_diagnostic or {})
+        if not failure.diagnostic:
+            current = getattr(client, "last_diagnostic", {})
+            failure.diagnostic = dict(current) if isinstance(current, dict) else {}
+        failure.diagnostic["checked_in_today"] = False
+        raise failure
     deadline = monotonic_fn() + CONFIRM_BUDGET_SECONDS
     queried = False
     for delay in CONFIRM_POLL_DELAYS:
@@ -975,6 +1188,7 @@ def _reconcile_pending(
         "completed": False,
         "query_only": True,
         "retry_at": retry_at if queried else None,
+        "checked_in_today": False if queried else None,
     }
 
 
@@ -1046,6 +1260,7 @@ def _claim_daily_locked(
             "completed": False,
             "query_only": False,
             "retry_at": None,
+            "checked_in_today": None,
         }
     detail = _campaign_detail(client, group)
     daily_tasks = [row for row in collect_tasks(detail, group) if row["daily"]]
@@ -1063,6 +1278,7 @@ def _claim_daily_locked(
             "completed": False,
             "query_only": False,
             "retry_at": None,
+            "checked_in_today": None,
         }
     task = daily_tasks[0]
     _ensure_ledger_day(entry, now_ms_fn)
@@ -1075,6 +1291,7 @@ def _claim_daily_locked(
             "completed": True,
             "query_only": False,
             "retry_at": None,
+            "checked_in_today": True,
         }
     entry.pending = PendingAttempt(
         group=task["group"],
@@ -1086,7 +1303,6 @@ def _claim_daily_locked(
     )
     store.save(entry)
     _ensure_ledger_day(entry, now_ms_fn)
-    _report_checkin_event(client)
 
     try:
         response = client.post(CLAIM_PATH, {"scene": task["group"]})
@@ -1103,6 +1319,7 @@ def _claim_daily_locked(
                 now_ms_fn,
                 monotonic_fn,
                 sleep_fn,
+                dict(error.diagnostic),
             )
         if not _is_confirming_error(error):
             if _is_rejected_error(error):
@@ -1125,6 +1342,7 @@ def _claim_daily_locked(
                 now_ms_fn,
                 monotonic_fn,
                 sleep_fn,
+                dict(client.last_diagnostic),
             )
         if _is_rejected_error(error):
             _clear_pending(store, entry)
@@ -1150,11 +1368,19 @@ def query_daily(client: DoubaoClient) -> Dict[str, Any]:
     launch = client.post("/alice/user/launch", {})
     group = _activity_group(launch)
     if not group:
-        return {"status": "inactive", "message": "当前没有豆包工作签到活动"}
+        return {
+            "status": "inactive",
+            "message": "当前没有豆包工作签到活动",
+            "checked_in_today": None,
+        }
     detail = _campaign_detail(client, group)
     task, error = _daily_task(detail, group)
     if error:
-        return {"status": "inactive", "message": error}
+        return {
+            "status": "inactive",
+            "message": error,
+            "checked_in_today": None,
+        }
     checked = task["checked"] is True
     return {
         "status": "done" if checked else "available",
@@ -1165,6 +1391,7 @@ def query_daily(client: DoubaoClient) -> Dict[str, Any]:
         "completed": checked,
         "query_only": True,
         "retry_at": None,
+        "checked_in_today": checked,
     }
 
 
@@ -1185,17 +1412,21 @@ def notify(title: str, content: str) -> None:
             )
             log(
                 "📢 PushPlus: %s"
-                % ("成功" if response.get("code") == 200 else str(response.get("msg", ""))[:60])
+                % (
+                    "成功"
+                    if response.get("code") == 200
+                    else redact_sensitive_text(response.get("msg", ""))[:60]
+                )
             )
         except Exception as error:
-            log("📢 PushPlus 异常: %s" % str(error)[:60])
+            log("📢 PushPlus 异常: %s" % redact_sensitive_text(error)[:60])
     bark = os.getenv("BARK_URL", "").strip().rstrip("/")
     if bark:
         try:
             requests.Session().post(bark, json={"title": title, "body": content}, timeout=15)
             log("📢 Bark: 已发送")
         except Exception as error:
-            log("📢 Bark 异常: %s" % str(error)[:60])
+            log("📢 Bark 异常: %s" % redact_sensitive_text(error)[:60])
     wecom = os.getenv("WECOM_WEBHOOK", "").strip()
     if wecom:
         try:
@@ -1208,7 +1439,7 @@ def notify(title: str, content: str) -> None:
             )
             log("📢 企业微信: 已发送")
         except Exception as error:
-            log("📢 企业微信异常: %s" % str(error)[:60])
+            log("📢 企业微信异常: %s" % redact_sensitive_text(error)[:60])
 
 
 def main() -> int:
@@ -1234,14 +1465,20 @@ def main() -> int:
 
     lines = ["🫘 豆包工作每日奖励", ""]
     failed = 0
+    action = "query" if args.query else "claim"
     for index, account in enumerate(accounts, 1):
+        client: Optional[DoubaoClient] = None
+        result: Optional[Dict[str, Any]] = None
+        failure: Optional[BaseException] = None
+        secrets = account_secret_values(account)
+        safe_name = redact_sensitive_text(account.name, secrets)
         log("")
-        log("╭─ 👤 账号%d  %s" % (index, account.name))
+        log("╭─ 👤 账号%d  %s" % (index, safe_name))
         try:
             client = DoubaoClient(account)
             result = query_daily(client) if args.query else claim_daily(client)
             status = result.get("status", "")
-            message = result.get("message", "")
+            message = redact_sensitive_text(result.get("message", ""), secrets)
             log("   %s: %s" % (status, message))
             if result.get("points") is not None:
                 log("   🎁 奖励额度: %s" % result["points"])
@@ -1250,7 +1487,7 @@ def main() -> int:
             lines.append(
                 "%s: %s%s"
                 % (
-                    account.name,
+                    safe_name,
                     message,
                     "（%s 额度）" % result["points"] if result.get("points") is not None else "",
                 )
@@ -1258,17 +1495,28 @@ def main() -> int:
             if status in ("error", "auth"):
                 failed += 1
         except DoubaoAuthError as error:
+            failure = error
             failed += 1
-            log("   ⛔ 登录态失效: %s" % error)
-            lines.append("%s: ⛔ %s" % (account.name, error))
+            safe_error = redact_sensitive_text(error, secrets)
+            log("   ⛔ 登录态失效: %s" % safe_error)
+            lines.append("%s: ⛔ %s" % (safe_name, safe_error))
         except DoubaoRateLimitError as error:
+            failure = error
             failed += 1
-            log("   ⏳ 限流: %s" % error)
-            lines.append("%s: ⏳ %s" % (account.name, error))
+            safe_error = redact_sensitive_text(error, secrets)
+            log("   ⏳ 限流: %s" % safe_error)
+            lines.append("%s: ⏳ %s" % (safe_name, safe_error))
         except Exception as error:
+            failure = error
             failed += 1
-            log("   ❌ %s" % str(error)[:160])
-            lines.append("%s: ❌ %s" % (account.name, str(error)[:100]))
+            safe_error = redact_sensitive_text(error, secrets)
+            log("   ❌ %s" % safe_error[:160])
+            lines.append("%s: ❌ %s" % (safe_name, safe_error[:100]))
+        try:
+            pending = ledger_pending_state(account_ledger_key(account), STATE_FILE)
+        except DoubaoError:
+            pending = "unreadable"
+        log_diagnostic(account, action, client, pending, result, failure)
         time.sleep(1)
 
     lines.extend(["", "🕐 %s" % time.strftime("%Y-%m-%d %H:%M")])

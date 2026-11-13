@@ -22,7 +22,7 @@
 - Chooses the v3 campaign detail endpoint or the regular campaign list endpoint.
 - Continues only when exactly one `daily_checkin` task is present.
 - Treats already claimed, campaign not deployed, and conditions not met as neutral states.
-- Sends a best-effort `landing/report` operation event immediately before an actual check-in claim.
+- Sends no synthetic `landing/report` event; only the documented `landing/checkin` claim can write check-in state.
 - `710010702` means the official page SDK context is required; click the official check-in button, then rerun for a read-only confirmation.
 - Re-reads the campaign detail after claiming and accepts only `checked_in_today=true`; `task_status=3` never overrides an explicit false.
 - Supports multiple accounts, query-only mode, single-account selection, and PushPlus, Bark, and WeCom notifications.
@@ -78,7 +78,7 @@ This matches the 09:15 Beijing-time rhythm of the workflow example `15 1 * * *`.
 
 ## ☁️ GitHub Actions
 
-The workflow is [../.github/workflows/daily.yml](../.github/workflows/daily.yml). Manual execution is enabled; the schedule block is commented out.
+The workflow is [../.github/workflows/daily.yml](../.github/workflows/daily.yml). Manual execution is enabled; the schedule block is commented out. Every run defaults to read-only `query`; only an explicit `workflow_dispatch` with `mode=claim` submits a claim. A schedule, when enabled, remains query-only.
 
 | Secret | Required | Purpose |
 | :--- | :---: | :--- |

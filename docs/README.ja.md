@@ -22,7 +22,7 @@
 - v3 detail または通常の campaign list エンドポイントを選択します。
 - 詳細内に `daily_checkin` がちょうど 1 件ある場合だけ処理します。
 - 受領済み、未配信、条件未達は中立状態として扱います。
-- 実際の checkin 直前に best-effort の `landing/report` 操作イベントを送信します。
+- 合成した `landing/report` イベントは送信しません。checkin 状態を書き換えるのは文書化された `landing/checkin` のみです。
 - `710010702` は公式ページ SDK のコンテキストが必要です。公式クライアントでチェックインしてから再実行してください。
 - 受領後に詳細を再取得し、`checked_in_today=true` のみを完了条件にします。`task_status=3` は明示的な false を上書きしません。
 - 複数アカウント、`--query`、`--only`、PushPlus、Bark、WeCom 通知に対応します。
@@ -76,7 +76,7 @@ pip3 install requests
 
 ## ☁️ GitHub Actions
 
-ワークフローは [../.github/workflows/daily.yml](../.github/workflows/daily.yml) です。手動実行が有効で、スケジュールはコメントアウトされています。
+ワークフローは [../.github/workflows/daily.yml](../.github/workflows/daily.yml) です。手動実行が有効で、スケジュールはコメントアウトされています。通常は読み取り専用の `query` で実行し、`workflow_dispatch` で明示的に `mode=claim` を選んだ場合だけ checkin を送信します。スケジュールを有効にしても `query` のみです。
 
 | Secret | 必須 | 用途 |
 | :--- | :---: | :--- |

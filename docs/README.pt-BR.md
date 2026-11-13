@@ -22,7 +22,7 @@
 - Escolhe o endpoint v3 de detalhes ou a lista regular de campanhas.
 - Continua apenas quando existe exatamente uma tarefa `daily_checkin`.
 - Trata recompensa já recebida, campanha não publicada e condição não atendida como estados neutros.
-- Envia um evento best-effort `landing/report` imediatamente antes do check-in real.
+- Não envia um evento sintético `landing/report`; somente o `landing/checkin` documentado grava o estado do check-in.
 - `710010702` indica que o contexto do SDK da página oficial é necessário; faça o check-in no cliente oficial e execute novamente.
 - Relê os detalhes após o resgate e aceita somente `checked_in_today=true`; `task_status=3` nunca substitui um false explícito.
 - Suporta várias contas, modo somente consulta, seleção de uma conta e notificações PushPlus, Bark e WeCom.
@@ -76,7 +76,7 @@ Execute `--query` manualmente antes de ativar o agendamento.
 
 ## ☁️ GitHub Actions
 
-O workflow está em [../.github/workflows/daily.yml](../.github/workflows/daily.yml). A execução manual está ativa e o bloco de agendamento está comentado.
+O workflow está em [../.github/workflows/daily.yml](../.github/workflows/daily.yml). A execução manual está ativa e o bloco de agendamento está comentado. A execução padrão é `query`, somente leitura; apenas um `workflow_dispatch` com `mode=claim` explícito envia o check-in. Quando o agendamento for ativado, ele continua sendo somente `query`.
 
 | Secret | Obrigatório | Uso |
 | :--- | :---: | :--- |

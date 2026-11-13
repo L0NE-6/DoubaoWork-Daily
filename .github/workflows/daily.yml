@@ -1,7 +1,18 @@
 name: 🫘 Doubao Work Daily
 
+run-name: "Doubao Work ${{ inputs.mode || 'query' }}"
+
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "query = 只读核验；claim = 明确提交一次签到"
+        required: true
+        default: query
+        type: choice
+        options:
+          - query
+          - claim
   # 定时默认关闭；确认账号可用后取消下面两行注释
   # schedule:
   #   - cron: "15 1 * * *"
@@ -10,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: doubaowork-daily
+  group: doubaowork-daily-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -32,7 +43,21 @@ jobs:
           restore-keys: |
             doubaowork-state-
       - run: pip install requests
-      - name: Run Doubao Work Daily
+      - name: Query only (default)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'query' }}
+        env:
+          DOUBAOWORK_COOKIES: ${{ secrets.DOUBAOWORK_COOKIES }}
+          DOUBAOWORK_COOKIE: ${{ secrets.DOUBAOWORK_COOKIE }}
+          DOUBAOWORK_DEVICE_ID: ${{ secrets.DOUBAOWORK_DEVICE_ID }}
+          DOUBAOWORK_WEB_ID: ${{ secrets.DOUBAOWORK_WEB_ID }}
+          DOUBAOWORK_FINGERPRINT: ${{ secrets.DOUBAOWORK_FINGERPRINT }}
+          DOUBAOWORK_PROXY: ${{ secrets.DOUBAOWORK_PROXY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          BARK_URL: ${{ secrets.BARK_URL }}
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: python doubaowork_daily.py --query
+      - name: Claim once (explicit dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'claim' }}
         env:
           DOUBAOWORK_COOKIES: ${{ secrets.DOUBAOWORK_COOKIES }}
           DOUBAOWORK_COOKIE: ${{ secrets.DOUBAOWORK_COOKIE }}
@@ -45,7 +70,7 @@ jobs:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python doubaowork_daily.py
       - name: Save Doubao Work check-in ledger
-        if: always() && hashFiles('doubaowork_state.json') != ''
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.mode == 'claim' && hashFiles('doubaowork_state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: doubaowork_state.json

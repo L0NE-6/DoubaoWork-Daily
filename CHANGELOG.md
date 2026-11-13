@@ -1,5 +1,13 @@
 # 更新日志
 
+## v1.3.2（2026-11-13）
+
+- GitHub Actions 默认执行只读 `--query`；只有 `workflow_dispatch` 显式选择 `mode=claim` 才运行领取，schedule 即使启用也固定只读。
+- 移除 `landing/report` 合成 `user_operate` 写请求。该事件没有参与成功判定，也不在当前 Agent2Providers doubaowork 签到实现中；它会增加云端风控面，不能替代官方页面 SDK 上下文。
+- 每个账号新增单行脱敏诊断，记录请求路径、HTTP 状态、业务 `code`、消息、`checked_in_today`、pending 状态、session Cookie 形态和设备上下文类型，不输出 Cookie、Token、手机号或设备值。
+- 明确 `sessionid==sessionid_ss` 不是脚本分支条件：两者至少有一个非空即可，同时存在时原样发送，台账身份优先使用 `sessionid`。
+- 新增 Actions 默认只读、显式 claim、无额外 report 写请求、相等 session Cookie、诊断脱敏和 pending 状态回归；全套 `41` 项测试通过。
+
 ## v1.3.1（2026-11-10）
 
 - `710010702` 重新归类为“需要官方活动页 SDK”：当前 landing/checkin 需要页面运行时生成的 `biz_params` 与 `AgwCommonParam`，纯 HTTP 不自行伪造。
